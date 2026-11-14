@@ -1,41 +1,41 @@
 mod applets;
 mod tile;
 
-use eframe::egui::{self, pos2, vec2, Align2, Color32, FontFamily, FontId, Id, Order, Pos2, Rect, Sense, TextStyle, Vec2};
+use eframe::egui::{
+    self, pos2, vec2, Align2, Color32, FontFamily, FontId, Id, LayerId, Order, PointerButton, Pos2, Rect, Sense,
+    Stroke, TextStyle, Vec2,
+};
 use egui_glass::{Glass, GlassStyle};
 
-use applets::{Kind, SystemStats, Todo, Notepad, ClickSpeed};
+use applets::{ClickSpeed, Clipboard, Kind, Notepad, Photo, Snake, SystemStats, Todo};
 use tile::{Cell, Out, Tile, View};
 
 const MAX_SIDE: u32 = 3840;
-const COLS: usize = 6;
-const ROWS: usize = 4;
-const GAP: f32 = 14.0;
+const CELL: f32 = 112.0;
+const GAP: f32 = 12.0;
 const MARGIN: f32 = 24.0;
 
 struct Grid {
     origin: Pos2,
-    cw: f32,
-    ch: f32,
+    cols: usize,
+    rows: usize,
 }
 
 impl Grid {
     fn new(avail: Rect) -> Self {
-        let w = avail.width() - 2.0 * MARGIN - (COLS - 1) as f32 * GAP;
-        let h = avail.height() - 2.0 * MARGIN - (ROWS - 1) as f32 * GAP;
+        let fit = |len: f32| (((len - 2.0 * MARGIN + GAP) / (CELL + GAP)).floor() as usize).max(1);
+        let (cols, rows) = (fit(avail.width()), fit(avail.height()));
+        let size = vec2(cols as f32, rows as f32) * (CELL + GAP) - vec2(GAP, GAP);
         Self {
-            origin: avail.min + vec2(MARGIN, MARGIN),
-            cw: w / COLS as f32,
-            ch: h / ROWS as f32,
+            origin: avail.center() - size / 2.0,
+            cols,
+            rows,
         }
     }
 
     fn rect(&self, (c, r, w, h): Cell) -> Rect {
-        let min = self.origin + vec2(c as f32 * (self.cw + GAP), r as f32 * (self.ch + GAP));
-        let size = vec2(
-            w as f32 * self.cw + (w as f32 - 1.0) * GAP,
-            h as f32 * self.ch + (h as f32 - 1.0) * GAP,
-        );
+        let min = self.origin + vec2(c as f32, r as f32) * (CELL + GAP);
+        let size = vec2(w as f32, h as f32) * CELL + vec2(w as f32 - 1.0, h as f32 - 1.0) * GAP;
         Rect::from_min_size(min, size)
     }
 }
@@ -44,16 +44,26 @@ fn overlaps(a: Cell, b: Cell) -> bool {
     a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
 }
 
+struct Ripple {
+    pos: Pos2,
+    t0: f64,
+    right: bool,
+}
+
 struct App {
     rs: eframe::egui_wgpu::RenderState,
     style: GlassStyle,
     tiles: Vec<Tile>,
     next_id: u64,
+    cols: usize,
+    rows: usize,
+    last_size: Vec2,
     focus: Option<u64>,
     expanded: bool,
     editing: bool,
     drag: Option<(u64, Vec2)>,
     resize: Option<(u64, Vec2)>,
+    ripples: Vec<Ripple>,
 }
 
 impl App {
@@ -72,19 +82,25 @@ impl App {
             rs,
             style: glass_style(),
             tiles: vec![
-                Tile::new(1, (0, 0, 3, 1), vec![Box::new(SystemStats::new())]),
-                Tile::new(2, (3, 0, 2, 2), vec![Box::new(ClickSpeed::new())]),
-                Tile::new(3, (0, 1, 2, 3), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
+                Tile::new(1, (0, 0, 4, 1), vec![Box::new(SystemStats::new())]),
+                Tile::new(2, (0, 1, 2, 2), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
+                Tile::new(3, (2, 1, 2, 2), vec![Box::new(Clipboard::new())]),
+                Tile::new(4, (4, 0, 2, 2), vec![Box::new(Photo::new())]),
+                Tile::new(5, (4, 2, 2, 2), vec![Box::new(ClickSpeed::new()), Box::new(Snake::new())]),
             ],
-            next_id: 3,
+            next_id: 5,
+            cols: 6,
+            rows: 4,
+            last_size: Vec2::ZERO,
             focus: None,
             expanded: false,
             editing: false,
             drag: None,
             resize: None,
+            ripples: Vec::new(),
         };
 
-        let path = std::env::args().nth(1).unwrap_or_else(|| "wallpaper.png".into());
+        let path = std::env::args().nth(1).unwrap_or_else(|| "wallpaper.jpg".into());
         app.set_wallpaper(&cc.egui_ctx, &path);
         app
     }
@@ -99,8 +115,8 @@ impl App {
     }
 
     fn is_free(&self, skip: Option<u64>, cell: Cell) -> bool {
-        cell.0 + cell.2 <= COLS
-            && cell.1 + cell.3 <= ROWS
+        cell.0 + cell.2 <= self.cols
+            && cell.1 + cell.3 <= self.rows
             && self
                 .tiles
                 .iter()
@@ -108,19 +124,28 @@ impl App {
                 .all(|t| !overlaps(t.cell, cell))
     }
 
-    fn add_tile(&mut self, kind: Kind) {
-        let (w, h) = kind.span();
-        for (w, h) in [(w, h), (2, 1), (1, 1)] {
-            for r in 0..=ROWS - h {
-                for c in 0..=COLS - w {
+    fn find_spot(&self, skip: Option<u64>, spans: &[(usize, usize)]) -> Option<Cell> {
+        for &(w, h) in spans {
+            if w > self.cols || h > self.rows {
+                continue;
+            }
+            for r in 0..=self.rows - h {
+                for c in 0..=self.cols - w {
                     let cell = (c, r, w, h);
-                    if self.is_free(None, cell) {
-                        self.next_id += 1;
-                        self.tiles.push(Tile::new(self.next_id, cell, vec![kind.build()]));
-                        return;
+                    if self.is_free(skip, cell) {
+                        return Some(cell);
                     }
                 }
             }
+        }
+        None
+    }
+
+    fn add_tile(&mut self, kind: Kind) {
+        let span = kind.span();
+        if let Some(cell) = self.find_spot(None, &[span, (2, 1), (1, 1)]) {
+            self.next_id += 1;
+            self.tiles.push(Tile::new(self.next_id, cell, vec![kind.build()]));
         }
     }
 
@@ -132,27 +157,42 @@ impl App {
         }
     }
 
+    fn relocate(&mut self) {
+        let outside: Vec<(u64, usize, usize)> = self
+            .tiles
+            .iter()
+            .filter(|t| t.cell.0 + t.cell.2 > self.cols || t.cell.1 + t.cell.3 > self.rows)
+            .map(|t| (t.id, t.cell.2, t.cell.3))
+            .collect();
+        for (id, w, h) in outside {
+            if let Some(cell) = self.find_spot(Some(id), &[(w, h)]) {
+                self.set_cell(id, cell);
+            }
+        }
+    }
+
     fn cell_of(&self, id: u64) -> Option<Cell> {
         self.tiles.iter().find(|t| t.id == id).map(|t| t.cell)
     }
 
     fn finish_drag(&mut self, grid: &Grid, id: u64) {
         let Some((_, d)) = self.drag.take() else { return };
-        let Some((_, _, w, h)) = self.cell_of(id) else { return };
-        let cell = self.cell_of(id).unwrap();
+        let Some(cell) = self.cell_of(id) else { return };
         let min = grid.rect(cell).translate(d).min;
-        let col = (((min.x - grid.origin.x) / (grid.cw + GAP)).round() as i32).clamp(0, (COLS - w) as i32) as usize;
-        let row = (((min.y - grid.origin.y) / (grid.ch + GAP)).round() as i32).clamp(0, (ROWS - h) as i32) as usize;
-        self.set_cell(id, (col, row, w, h));
+        let step = CELL + GAP;
+        let col = (((min.x - grid.origin.x) / step).round() as i32).clamp(0, self.cols.saturating_sub(cell.2) as i32);
+        let row = (((min.y - grid.origin.y) / step).round() as i32).clamp(0, self.rows.saturating_sub(cell.3) as i32);
+        self.set_cell(id, (col as usize, row as usize, cell.2, cell.3));
     }
 
     fn finish_resize(&mut self, grid: &Grid, id: u64) {
         let Some((_, d)) = self.resize.take() else { return };
         let Some(cell) = self.cell_of(id) else { return };
         let size = grid.rect(cell).size() + d;
-        let w = (((size.x + GAP) / (grid.cw + GAP)).round() as i32).clamp(1, (COLS - cell.0) as i32) as usize;
-        let h = (((size.y + GAP) / (grid.ch + GAP)).round() as i32).clamp(1, (ROWS - cell.1) as i32) as usize;
-        self.set_cell(id, (cell.0, cell.1, w, h));
+        let step = CELL + GAP;
+        let w = (((size.x + GAP) / step).round() as i32).clamp(1, self.cols.saturating_sub(cell.0).max(1) as i32);
+        let h = (((size.y + GAP) / step).round() as i32).clamp(1, self.rows.saturating_sub(cell.1).max(1) as i32);
+        self.set_cell(id, (cell.0, cell.1, w as usize, h as usize));
     }
 
     fn end_edit(&mut self) {
@@ -301,13 +341,48 @@ fn distance_to(r: Rect, p: Pos2) -> f32 {
     dx.hypot(dy)
 }
 
+// damped spring: tiles get pushed away from a left click and pulled toward a right click
+fn impulse(ripples: &[(Pos2, f32, bool)], center: Pos2) -> Vec2 {
+    let mut v = Vec2::ZERO;
+    for &(pos, age, right) in ripples {
+        let d = center - pos;
+        let dist = d.length().max(1.0);
+        let amp = 7.0 * (-dist / 240.0).exp() * (age * 15.0).sin() * (-age * 4.5).exp();
+        v += d / dist * amp * if right { -1.0 } else { 1.0 };
+    }
+    v
+}
+
+const LEFT_RINGS: [(f32, f32, f32); 1] = [(0.0, 150.0, 1.0)];
+const RIGHT_RINGS: [(f32, f32, f32); 2] = [(0.0, 120.0, 1.0), (0.14, 90.0, 0.7)];
+
+fn draw_ripples(ctx: &egui::Context, ripples: &[Ripple], time: f64) {
+    let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("ripples")));
+    for r in ripples {
+        let age = (time - r.t0) as f32;
+        let rings: &[(f32, f32, f32)] = if r.right { &RIGHT_RINGS } else { &LEFT_RINGS };
+        for &(delay, max_r, strength) in rings {
+            let t = (age - delay) / 0.75;
+            if !(0.0..1.0).contains(&t) {
+                continue;
+            }
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let fade = (1.0 - t).powf(1.6) * strength;
+            let radius = 6.0 + max_r * eased;
+            painter.circle_filled(r.pos, radius, Color32::from_white_alpha((14.0 * fade) as u8));
+            painter.circle_stroke(
+                r.pos,
+                radius,
+                Stroke::new(1.0 + 2.0 * (1.0 - t), Color32::from_white_alpha((170.0 * fade) as u8)),
+            );
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
-            self.set_wallpaper(&ctx, &path.to_string_lossy());
-        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.editing {
                 self.end_edit();
@@ -322,6 +397,12 @@ impl eframe::App for App {
                 egui_glass::show_backdrop(ui, ui.max_rect());
                 let avail = ui.max_rect();
                 let grid = Grid::new(avail);
+                self.cols = grid.cols;
+                self.rows = grid.rows;
+                self.relocate();
+
+                let resizing = (avail.size() - self.last_size).length() > 0.5;
+                self.last_size = avail.size();
                 let full = avail.shrink(MARGIN);
                 let time = ctx.input(|i| i.time);
                 let ctrl = ctx.input(|i| i.modifiers.ctrl);
@@ -330,18 +411,29 @@ impl eframe::App for App {
                     ctx.request_repaint();
                 }
 
+                self.ripples.retain(|r| time - r.t0 < 1.0);
+                if !self.ripples.is_empty() {
+                    ctx.request_repaint();
+                }
+                let waves: Vec<(Pos2, f32, bool)> = self
+                    .ripples
+                    .iter()
+                    .map(|r| (r.pos, (time - r.t0) as f32, r.right))
+                    .collect();
+
                 let mut rects: Vec<(Rect, Rect)> = Vec::new();
                 for t in &self.tiles {
                     let base = grid.rect(t.cell);
+                    let calm = if resizing { 0.0 } else { 0.3 };
                     let (target, secs) = if let Some((_, d)) = self.drag.filter(|(id, _)| *id == t.id) {
                         (base.translate(d), 0.0)
                     } else if let Some((_, d)) = self.resize.filter(|(id, _)| *id == t.id) {
-                        let size = (base.size() + d).max(vec2(grid.cw * 0.6, grid.ch * 0.6));
+                        let size = (base.size() + d).max(vec2(CELL * 0.6, CELL * 0.6));
                         (Rect::from_min_size(base.min, size), 0.0)
                     } else if self.expanded && self.focus == Some(t.id) {
-                        (full, 0.3)
+                        (full, calm)
                     } else {
-                        (base, 0.3)
+                        (base, calm)
                     };
                     rects.push((base, animate_rect(&ctx, t.id, target, secs)));
                 }
@@ -354,6 +446,17 @@ impl eframe::App for App {
                         if settled {
                             self.focus = None;
                         }
+                    }
+                }
+
+                if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
+                    let at = ctx.input(|i| i.pointer.latest_pos());
+                    let mut taken = false;
+                    if let Some(i) = at.and_then(|p| rects.iter().position(|(_, r)| r.contains(p))) {
+                        taken = self.tiles[i].on_drop(&ctx, &path);
+                    }
+                    if !taken {
+                        self.set_wallpaper(&ctx, &path.to_string_lossy());
                     }
                 }
 
@@ -392,13 +495,19 @@ impl eframe::App for App {
                     } else if !focused {
                         let target = pointer.map_or(0.0, |p| (1.0 - distance_to(rect, p) / 170.0).clamp(0.0, 1.0));
                         prox = ctx.animate_value_with_time(Id::unique(("prox", tile.id)), target, 0.18);
-                        glass = rect.expand(5.0 * prox);
-                        if let Some(p) = pointer {
-                            let dir = (p - rect.center()).normalized();
-                            if dir.is_finite() {
-                                glass = glass.translate(dir * 2.5 * prox);
-                            }
-                        }
+                        let half = rect.size() / 2.0;
+                        let tilt = pointer.map_or(Vec2::ZERO, |p| {
+                            let rel = (p - rect.center()) / half;
+                            vec2(rel.x.clamp(-1.0, 1.0), rel.y.clamp(-1.0, 1.0))
+                        });
+                        glass = rect.expand(5.0 * prox).translate(tilt * 2.5 * prox);
+                        rect = rect.translate(tilt * 4.0 * prox);
+                    }
+
+                    if !self.editing {
+                        let push = impulse(&waves, rect.center());
+                        rect = rect.translate(push);
+                        glass = glass.translate(push);
                     }
 
                     let mut s = style;
@@ -424,6 +533,25 @@ impl eframe::App for App {
                         });
                     outs.push((tile.id, out));
                 }
+
+                let press = ctx.input(|i| {
+                    let p = i.pointer.hover_pos()?;
+                    if i.pointer.button_pressed(PointerButton::Primary) {
+                        Some((p, false))
+                    } else if i.pointer.button_pressed(PointerButton::Secondary) {
+                        Some((p, true))
+                    } else {
+                        None
+                    }
+                });
+                if let (Some((p, right)), false) = (press, self.editing) {
+                    let on_tile = outs.iter().any(|(_, o)| o.body_hovered);
+                    let on_backdrop = ctx.layer_id_at(p).is_none_or(|l| l.order == Order::Background);
+                    if on_tile || on_backdrop {
+                        self.ripples.push(Ripple { pos: p, t0: time, right });
+                    }
+                }
+                draw_ripples(&ctx, &self.ripples, time);
 
                 for (id, out) in outs {
                     if out.expand {
@@ -500,8 +628,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_inner_size([900.0, 620.0])
+            .with_min_inner_size([800.0, 560.0]),
         ..Default::default()
     };
     eframe::run_native(

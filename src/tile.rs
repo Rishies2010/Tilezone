@@ -17,6 +17,7 @@ pub struct View {
 
 #[derive(Default)]
 pub struct Out {
+    pub body_hovered: bool,
     pub expand: bool,
     pub long_press: bool,
     pub remove: bool,
@@ -49,6 +50,10 @@ impl Tile {
 
     fn capsule(&self) -> bool {
         self.cell.3 == 1 && self.cell.2 >= 2
+    }
+
+    pub fn on_drop(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
+        self.applets[self.active].on_drop(ctx, path)
     }
 
     pub fn scroll(&mut self, amount: f32, now: f64) {
@@ -85,6 +90,7 @@ impl Tile {
 
         if !view.editing {
             let body = ui.interact(rect, Id::unique((self.id, "body")), Sense::click_and_drag());
+            out.body_hovered = body.hovered();
             if body.is_pointer_button_down_on() && !body.dragged() {
                 ctx.request_repaint();
                 let held = ui.input(|i| i.pointer.press_start_time().map_or(0.0, |t| i.time - t));
