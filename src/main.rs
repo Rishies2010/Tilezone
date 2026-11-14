@@ -1,27 +1,59 @@
 use eframe::egui;
 use egui_glass::{Glass, GlassStyle};
 
+const MAX_SIDE: u32 = 3840;
+
 struct App {
+    rs: eframe::egui_wgpu::RenderState,
     style: GlassStyle,
     tint_alpha: u8,
+    image_path: String,
+    image_err: Option<String>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let rs = cc
             .wgpu_render_state
-            .as_ref()
+            .clone()
             .expect("eframe must use the wgpu renderer");
 
-        egui_glass::init(rs, 1);
+        egui_glass::init(&rs, 1);
+        egui_glass::set_backdrop(&cc.egui_ctx, &rs, &fallback_wallpaper());
 
-        // Not one colour as glass refraction will look bare.
-        egui_glass::set_backdrop(&cc.egui_ctx, rs, &dyn_wallpaper());
-
-        let style = GlassStyle::clear();
-        Self {
+        let style = GlassStyle {
+            corner_radius: 40.0,
+            corner_smoothing: 1.0,
+            blur: 2.0,
+            refraction: 60.0,
+            edge_width: 50.0,
+            chromatic: 0.3,
+            tint: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 0),
+            brightness: 1.0,
+            saturation: 1.2,
+            specular: 0.9,
+            border: 0.5,
+            shadow: 0.0,
+            ..GlassStyle::clear()
+        };
+        let mut app = Self {
+            rs,
             tint_alpha: style.tint.a(),
             style,
+            image_path: std::env::args().nth(1).unwrap_or_else(|| "wallpaper.jpg".into()),
+            image_err: None,
+        };
+        app.load_backdrop(&cc.egui_ctx);
+        app
+    }
+
+    fn load_backdrop(&mut self, ctx: &egui::Context) {
+        match load_image(self.image_path.trim().trim_matches('"')) {
+            Ok(img) => {
+                egui_glass::set_backdrop(ctx, &self.rs, &img);
+                self.image_err = None;
+            }
+            Err(e) => self.image_err = Some(e),
         }
     }
 
@@ -56,63 +88,28 @@ impl App {
     }
 }
 
-fn dyn_wallpaper() -> egui::ColorImage {
-    const W: usize = 1024;
-    const H: usize = 1024;
-    let mut img = egui::ColorImage::filled([W, H], egui::Color32::BLACK);
+fn load_image(path: &str) -> Result<egui::ColorImage, String> {
+    let mut img = image::open(path).map_err(|e| e.to_string())?;
+    if img.width().max(img.height()) > MAX_SIDE {
+        img = img.thumbnail(MAX_SIDE, MAX_SIDE);
+    }
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+}
 
-    let blobs = [
-        (0.22, 0.28, 0.30, 255.0, 80.0, 220.0),
-        (0.78, 0.35, 0.26, 120.0, 90.0, 255.0),
-        (0.50, 0.80, 0.34, 218.0, 112.0, 214.0),
-        (0.88, 0.85, 0.20, 190.0, 20.0, 255.0),
-    ];
-
-    for y in 0..H {
-        for x in 0..W {
-            let u = x as f32 / W as f32;
-            let v = y as f32 / H as f32;
-
-            // deep violet > dark indigo
-            let t = (u + v) * 0.5;
-            let mut r = 25.0 + 45.0 * t;
-            let mut g = 8.0 + 14.0 * t;
-            let mut b = 55.0 + 85.0 * (1.0 - t);
-
-            for (bx, by, rad, br, bg, bb) in blobs {
-                let d = ((u - bx) * (u - bx) + (v - by) * (v - by)).sqrt();
-                let k = (1.0 - d / rad).clamp(0.0, 1.0);
-                let k = k * k * (3.0 - 2.0 * k);
-                r += br * k;
-                g += bg * k;
-                b += bb * k;
-            }
-
+// fallback
+fn fallback_wallpaper() -> egui::ColorImage {
+    const N: usize = 1024;
+    let mut img = egui::ColorImage::filled([N, N], egui::Color32::BLACK);
+    for y in 0..N {
+        for x in 0..N {
+            let mut v = 20 + (x + y) / 16;
             if x % 64 < 2 || y % 64 < 2 {
-                r += 70.0;
-                g += 40.0;
-                b += 110.0;
+                v += 40;
             }
-            
-            let dx = x as f32 - W as f32 * 0.5;
-            let dy = y as f32 - H as f32 * 0.5;
-            if (dx * dx + dy * dy).sqrt() % 48.0 < 3.0 {
-                r += 120.0;
-                g += 60.0;
-                b += 160.0;
-            }
-            
-            if (x + y) % 192 < 14 {
-                r += 90.0;
-                g += 0.0;
-                b += 150.0;
-            }
-
-            img[(x, y)] = egui::Color32::from_rgb(
-                r.min(255.0) as u8,
-                g.min(255.0) as u8,
-                b.min(255.0) as u8,
-            );
+            let v = v as u8;
+            img[(x, y)] = egui::Color32::from_rgb(v, v, v + 15);
         }
     }
     img
@@ -167,6 +164,18 @@ impl eframe::App for App {
         egui::Window::new("glass tuner")
             .default_pos(egui::pos2(700.0, 40.0))
             .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    let field = ui.text_edit_singleline(&mut self.image_path);
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button("load").clicked() || enter {
+                        self.load_backdrop(ui.ctx());
+                    }
+                });
+                if let Some(err) = &self.image_err {
+                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                }
+                ui.separator();
+
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("regular").clicked() {
                         self.load_preset(GlassStyle::regular());
@@ -215,7 +224,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "glass spike",
+        "Tilezone",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
