@@ -1,14 +1,24 @@
-use eframe::egui;
-use egui_glass::{Glass, GlassStyle};
+mod applets;
+mod tile;
+
+use eframe::egui::{self, vec2, Color32, Id, Order, Rect, Sense};
+use egui_glass::GlassStyle;
+
+use applets::{ClickSpeed, Notepad, SystemStats, Todo};
+use tile::Tile;
 
 const MAX_SIDE: u32 = 3840;
+const COLS: f32 = 6.0;
+const ROWS: f32 = 4.0;
+const GAP: f32 = 16.0;
+const MARGIN: f32 = 28.0;
 
 struct App {
     rs: eframe::egui_wgpu::RenderState,
     style: GlassStyle,
-    tint_alpha: u8,
-    image_path: String,
-    image_err: Option<String>,
+    tiles: Vec<Tile>,
+    focus: Option<usize>,
+    expanded: bool,
 }
 
 impl App {
@@ -20,72 +30,74 @@ impl App {
 
         egui_glass::init(&rs, 1);
         egui_glass::set_backdrop(&cc.egui_ctx, &rs, &fallback_wallpaper());
+        cc.egui_ctx.set_visuals(visuals());
 
-        let style = GlassStyle {
-            corner_radius: 40.0,
-            corner_smoothing: 1.0,
-            blur: 2.0,
-            refraction: 60.0,
-            edge_width: 50.0,
-            chromatic: 0.3,
-            tint: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 0),
-            brightness: 1.0,
-            saturation: 1.2,
-            specular: 0.9,
-            border: 0.5,
-            shadow: 0.0,
-            ..GlassStyle::clear()
-        };
-        let mut app = Self {
+        let app = Self {
             rs,
-            tint_alpha: style.tint.a(),
-            style,
-            image_path: std::env::args().nth(1).unwrap_or_else(|| "wallpaper.jpg".into()),
-            image_err: None,
+            style: glass_style(),
+            tiles: vec![
+                Tile::new("system", (0, 0, 2, 2), vec![Box::new(SystemStats::new())]),
+                Tile::new("notes", (2, 0, 2, 3), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
+                Tile::new("games", (4, 0, 2, 2), vec![Box::new(ClickSpeed::new())]),
+            ],
+            focus: None,
+            expanded: false,
         };
-        app.load_backdrop(&cc.egui_ctx);
+
+        let path = std::env::args().nth(1).unwrap_or_else(|| "wallpaper.jpg".into());
+        app.set_wallpaper(&cc.egui_ctx, &path);
         app
     }
 
-    fn load_backdrop(&mut self, ctx: &egui::Context) {
-        match load_image(self.image_path.trim().trim_matches('"')) {
+    fn set_wallpaper(&self, ctx: &egui::Context, path: &str) {
+        match load_image(path.trim().trim_matches('"')) {
             Ok(img) => {
                 egui_glass::set_backdrop(ctx, &self.rs, &img);
-                self.image_err = None;
             }
-            Err(e) => self.image_err = Some(e),
+            Err(e) => eprintln!("wallpaper: {e}"),
         }
     }
+}
 
-    fn load_preset(&mut self, style: GlassStyle) {
-        self.tint_alpha = style.tint.a();
-        self.style = style;
+fn glass_style() -> GlassStyle {
+    GlassStyle {
+        corner_radius: 40.0,
+        corner_smoothing: 1.0,
+        blur: 2.0,
+        refraction: 60.0,
+        edge_width: 50.0,
+        chromatic: 0.3,
+        tint: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 0),
+        brightness: 1.0,
+        saturation: 1.2,
+        specular: 0.9,
+        border: 0.5,
+        shadow: 0.0,
+        ..GlassStyle::clear()
     }
+}
 
-    fn as_rust(&self) -> String {
-        let s = &self.style;
-        format!(
-            "GlassStyle {{ corner_radius: {:?}, corner_smoothing: {:?}, blur: {:?}, refraction: {:?}, \
-             edge_width: {:?}, chromatic: {:?}, tint: egui::Color32::from_rgba_unmultiplied(255, 255, 255, {}), \
-             brightness: {:?}, saturation: {:?}, specular: {:?}, border: {:?}, shadow: {:?}, \
-             shadow_radius: {:?}, shadow_offset: {:?}, shadow_spread: {:?} }}",
-            s.corner_radius,
-            s.corner_smoothing,
-            s.blur,
-            s.refraction,
-            s.edge_width,
-            s.chromatic,
-            self.tint_alpha,
-            s.brightness,
-            s.saturation,
-            s.specular,
-            s.border,
-            s.shadow,
-            s.shadow_radius,
-            s.shadow_offset,
-            s.shadow_spread,
-        )
+fn visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(Color32::from_white_alpha(235));
+    v.extreme_bg_color = Color32::from_white_alpha(18);
+    let radius = egui::CornerRadius::same(12);
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.corner_radius = radius;
     }
+    v.widgets.inactive.weak_bg_fill = Color32::from_white_alpha(22);
+    v.widgets.inactive.bg_fill = Color32::from_white_alpha(22);
+    v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    v.widgets.hovered.weak_bg_fill = Color32::from_white_alpha(44);
+    v.widgets.hovered.bg_fill = Color32::from_white_alpha(44);
+    v.widgets.active.weak_bg_fill = Color32::from_white_alpha(66);
+    v.widgets.active.bg_fill = Color32::from_white_alpha(66);
+    v
 }
 
 fn load_image(path: &str) -> Result<egui::ColorImage, String> {
@@ -98,10 +110,10 @@ fn load_image(path: &str) -> Result<egui::ColorImage, String> {
     Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
-// fallback
+// only shown until a real image loads
 fn fallback_wallpaper() -> egui::ColorImage {
     const N: usize = 1024;
-    let mut img = egui::ColorImage::filled([N, N], egui::Color32::BLACK);
+    let mut img = egui::ColorImage::filled([N, N], Color32::BLACK);
     for y in 0..N {
         for x in 0..N {
             let mut v = 20 + (x + y) / 16;
@@ -109,109 +121,118 @@ fn fallback_wallpaper() -> egui::ColorImage {
                 v += 40;
             }
             let v = v as u8;
-            img[(x, y)] = egui::Color32::from_rgb(v, v, v + 15);
+            img[(x, y)] = Color32::from_rgb(v, v, v + 15);
         }
     }
     img
 }
 
+fn grid_rect(avail: Rect, (col, row, w, h): (usize, usize, usize, usize)) -> Rect {
+    let cw = (avail.width() - 2.0 * MARGIN - (COLS - 1.0) * GAP) / COLS;
+    let ch = (avail.height() - 2.0 * MARGIN - (ROWS - 1.0) * GAP) / ROWS;
+    let min = avail.min + vec2(MARGIN + col as f32 * (cw + GAP), MARGIN + row as f32 * (ch + GAP));
+    let size = vec2(w as f32 * cw + (w as f32 - 1.0) * GAP, h as f32 * ch + (h as f32 - 1.0) * GAP);
+    Rect::from_min_size(min, size)
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    Rect::from_min_max(a.min.lerp(b.min, t), a.max.lerp(b.max, t))
+}
+
+fn wheel_amount(ctx: &egui::Context) -> f32 {
+    ctx.input(|i| {
+        i.events
+            .iter()
+            .map(|e| match e {
+                egui::Event::MouseWheel { unit, delta, modifiers, .. } if modifiers.ctrl && modifiers.shift => {
+                    let d = delta.x + delta.y;
+                    match unit {
+                        egui::MouseWheelUnit::Point => d / 40.0,
+                        _ => d,
+                    }
+                }
+                _ => 0.0,
+            })
+            .sum()
+    })
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
+            self.set_wallpaper(&ctx, &path.to_string_lossy());
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.expanded = false;
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 egui_glass::show_backdrop(ui, ui.max_rect());
+                let avail = ui.max_rect();
 
-                // Tile
-                egui::Area::new(egui::Id::unique("tile_cpu"))
-                    .default_pos(egui::pos2(60.0, 60.0))
-                    .movable(true)
-                    .constrain(false)
-                    .show(ui.ctx(), |ui| {
-                        Glass::new(self.style).show(ui, |ui| {
-                            ui.set_min_size(egui::vec2(220.0, 120.0));
-                            ui.heading("CPU");
-                            ui.label("drag me over the grid lines");
-                        });
-                    });
-
-                // Tile 2
-                egui::Area::new(egui::Id::unique("tile_todo"))
-                    .default_pos(egui::pos2(360.0, 120.0))
-                    .movable(true)
-                    .constrain(false)
-                    .show(ui.ctx(), |ui| {
-                        Glass::new(self.style).show(ui, |ui| {
-                            ui.set_min_size(egui::vec2(260.0, 200.0));
-                            ui.heading("Todo");
-                            ui.label("nqetm's liquid glass spike");
-                        });
-                    });
-
-                // Tile 3
-                egui::Area::new(egui::Id::unique("tile_pill"))
-                    .default_pos(egui::pos2(120.0, 320.0))
-                    .movable(true)
-                    .constrain(false)
-                    .show(ui.ctx(), |ui| {
-                        Glass::new(self.style.with_corner_radius(f32::INFINITY)).show(ui, |ui| {
-                            ui.set_min_size(egui::vec2(180.0, 40.0));
-                            ui.label("capsule");
-                        });
-                    });
-            });
-
-        egui::Window::new("glass tuner")
-            .default_pos(egui::pos2(700.0, 40.0))
-            .show(ui.ctx(), |ui| {
-                ui.horizontal(|ui| {
-                    let field = ui.text_edit_singleline(&mut self.image_path);
-                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.button("load").clicked() || enter {
-                        self.load_backdrop(ui.ctx());
-                    }
-                });
-                if let Some(err) = &self.image_err {
-                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                let t = ctx.animate_bool_with_time(Id::unique("expand"), self.expanded, 0.3);
+                if t == 0.0 && !self.expanded {
+                    self.focus = None;
                 }
-                ui.separator();
+                let eased = t * t * (3.0 - 2.0 * t);
+                let full = avail.shrink(MARGIN);
 
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("regular").clicked() {
-                        self.load_preset(GlassStyle::regular());
-                    }
-                    if ui.button("clear").clicked() {
-                        self.load_preset(GlassStyle::clear());
-                    }
-                    if ui.button("panel").clicked() {
-                        self.load_preset(GlassStyle::panel());
-                    }
-                    if ui.button("dark").clicked() {
-                        self.load_preset(GlassStyle::dark());
-                    }
-                });
-                ui.separator();
+                let rects: Vec<Rect> = self
+                    .tiles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tile)| {
+                        let base = grid_rect(avail, tile.cell);
+                        if self.focus == Some(i) {
+                            lerp_rect(base, full, eased)
+                        } else {
+                            base
+                        }
+                    })
+                    .collect();
 
-                ui.add(egui::Slider::new(&mut self.style.corner_radius, 0.0..=60.0).text("corner radius"));
-                ui.add(egui::Slider::new(&mut self.style.corner_smoothing, 0.0..=1.0).text("corner smoothing"));
-                ui.add(egui::Slider::new(&mut self.style.blur, 0.0..=40.0).text("blur"));
-                ui.add(egui::Slider::new(&mut self.style.refraction, 0.0..=60.0).text("refraction"));
-                ui.add(egui::Slider::new(&mut self.style.edge_width, 1.0..=80.0).text("edge width"));
-                ui.add(egui::Slider::new(&mut self.style.chromatic, 0.0..=1.0).text("chromatic"));
-                ui.add(egui::Slider::new(&mut self.tint_alpha, 0..=255).text("tint alpha"));
-                ui.add(egui::Slider::new(&mut self.style.brightness, 0.5..=1.5).text("brightness"));
-                ui.add(egui::Slider::new(&mut self.style.saturation, 0.0..=2.0).text("saturation"));
-                ui.add(egui::Slider::new(&mut self.style.specular, 0.0..=1.0).text("specular"));
-                ui.add(egui::Slider::new(&mut self.style.border, 0.0..=1.0).text("border"));
-                ui.add(egui::Slider::new(&mut self.style.shadow, 0.0..=1.0).text("shadow"));
+                let amount = wheel_amount(&ctx);
+                if amount != 0.0 {
+                    if let Some(pos) = ctx.pointer_hover_pos() {
+                        let hit = match self.focus {
+                            Some(i) => rects[i].contains(pos).then_some(i),
+                            None => rects.iter().position(|r| r.contains(pos)),
+                        };
+                        if let Some(i) = hit {
+                            let now = ctx.input(|i| i.time);
+                            self.tiles[i].scroll(amount, now);
+                        }
+                    }
+                }
 
-                self.style.tint =
-                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, self.tint_alpha);
+                let (style, expanded, focus) = (self.style, self.expanded, self.focus);
+                let mut toggle = None;
+                for (i, tile) in self.tiles.iter_mut().enumerate() {
+                    let order = if focus == Some(i) { Order::Foreground } else { Order::Middle };
+                    egui::Area::new(Id::unique(("tile", tile.id)))
+                        .order(order)
+                        .fixed_pos(rects[i].min)
+                        .movable(false)
+                        .show(&ctx, |ui| {
+                            let (rect, _) = ui.allocate_exact_size(rects[i].size(), Sense::hover());
+                            let is_open = expanded && focus == Some(i);
+                            if tile.show(ui, rect, &style, is_open) {
+                                toggle = Some(i);
+                            }
+                        });
+                }
 
-                ui.separator();
-                if ui.button("copy these values").clicked() {
-                    let code = self.as_rust();
-                    ui.ctx().copy_text(code);
+                if let Some(i) = toggle {
+                    if self.expanded && self.focus == Some(i) {
+                        self.expanded = false;
+                    } else {
+                        self.focus = Some(i);
+                        self.expanded = true;
+                    }
                 }
             });
     }
@@ -221,10 +242,13 @@ fn main() -> eframe::Result {
     env_logger::init();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Tilezone",
+        "glass spike",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
