@@ -1,8 +1,10 @@
 [package]
-name = "Tilezone"
+name = "glass_spike"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-eframe = { version = "0.37.0", features = ["glow"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.37"
+egui_glass = "0.2.0"
 env_logger = "0.11"
