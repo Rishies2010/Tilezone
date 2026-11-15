@@ -1,6 +1,16 @@
-# Tilezone
+<h1 align="center">Tilezone</h1>
 
-A Tile dashboard with a Liquid Glass aesthetic, written in Rust. Tiles are rearrangeable glass panels hosting small applets, drawn over a live wallpaper (still image, animated GIF or WebP, video, or fallback). Uses wgpu.
+<p align="center">
+  <img
+    width="1920"
+    alt="screenshot"
+    src="https://github.com/user-attachments/assets/47168c9c-32db-4939-8b91-5acda433de81"
+  />
+</p>
+
+---
+
+**A Tile dashboard** with a **Liquid Glass** aesthetic, written in **`RUST`**. Tiles are rearrangeable glass panels hosting small applets, drawn over a live wallpaper (still image, animated GIF or WebP, video, or fallback). Uses wgpu.
 
 ## Features
 
