@@ -1,33 +1,15 @@
 # Tilezone
 
-A GPU-rendered tile dashboard with a Liquid Glass aesthetic, written in Rust. Tiles are rearrangeable glass panels hosting small applets, drawn over a live wallpaper (still image, animated GIF or WebP, video, or procedural aurora [fallback] ).
+A Tile dashboard with a Liquid Glass aesthetic, written in Rust. Tiles are rearrangeable glass panels hosting small applets, drawn over a live wallpaper (still image, animated GIF or WebP, video, or fallback). Uses wgpu.
 
 ## Features
 
-- Liquid Glass material: multi-tap blur, edge refraction, chromatic dispersion, specular rim, and backdrop magnification
-- Live backdrop: expanded tiles refract the tiles beneath them, not just the wallpaper
-- Animated wallpaper: image, GIF, WebP, video (via ffmpeg), or built-in procedural aurora
-- Spring-driven layout: every tile move, resize, spawn, and removal is animated, including window resizes
-- Multi-applet tiles: Ctrl+Scroll cycles applets within a tile, with a dropdown for manual selection
-- Grid editor: drag, resize with snapping, add, and remove tiles
-- Click warp: pointer clicks emit a refractive shockwave that bends the wallpaper and displaces tiles
-- Desktop pet that walks, hops between tile edges, and sleeps when idle
-
-## Applets
-
-| Applet | Description |
-| --- | --- |
-| System | CPU, RAM, GPU (when available), and disk gauges |
-| Reminders | Task list |
-| Notes | Plain text notepad |
-| Clipboard | Recent clipboard history |
-| Photo | Pinned picture |
-| Viewer | Folder-aware image viewer with zoom and pan |
-| Paint | Antialiased canvas with undo and PNG export |
-| Click speed | Clicks per second counter |
-| Snake | Classic snake |
-| Space shooter | 2D arcade shooter |
-| Settings | Background selection, refraction, zoom, reduce effects, pet toggle |
+- Liquid Glass material
+- Static, video or generated wallpapers
+- Multi-applet tiles
+- Edit mode for tiles
+- Interactive and animated everything!
+- Desktop pet cat!
 
 ## Requirements
 
@@ -51,7 +33,7 @@ cargo run --release -- path/to/wallpaper.mp4
 | Hover tile, chevron button | Select applet |
 | Ctrl + Scroll over a tile | Cycle applets |
 | Long press a tile | Enter edit mode |
-| Edit mode: drag / corner handle / minus badge | Move / resize / remove |
+| Edit mode: drag / corner handle / minus badge | Move or Merge / resize / remove |
 | Edit mode: Add | Insert a new tile |
 | Left click | Outward warp |
 | Right click | Inward warp |
@@ -60,6 +42,12 @@ cargo run --release -- path/to/wallpaper.mp4
 ## Vendored dependency
 
 `vendor/egui_glass` is a patched copy of `egui_glass` 0.2.0.
+
+## Coming features
+
+- Adding more applets, always
+- Feature to rearrange applets within tiles
+- Feature to remove an applet from a multi-applet tile.
 
 ## Credits
 
