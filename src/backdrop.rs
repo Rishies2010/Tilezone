@@ -52,7 +52,7 @@ impl Video {
             .spawn()
             .map_err(|_| "ffmpeg was not found on PATH".to_string())?;
         let mut out = child.stdout.take().ok_or("ffmpeg gave no output pipe")?;
-        let (tx, rx) = sync_channel(3);
+        let (tx, rx) = sync_channel(16);
         let len = (w * h * 4) as usize;
         std::thread::spawn(move || loop {
             let mut buf = vec![0u8; len];

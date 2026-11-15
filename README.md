@@ -59,6 +59,10 @@ cargo run --release -- path/to/wallpaper.mp4
 - Feature to rearrange applets within tiles
 - Feature to remove an applet from a multi-applet tile.
 
+## Known bugs
+
+- Some videos stutter/lag when looping around.
+
 ## Credits
 
 - egui and eframe by Emil Ernerfeldt and contributors
