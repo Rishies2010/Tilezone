@@ -81,7 +81,7 @@ enum Source {
     Aurora,
 }
 
-const BUNDLED: &[u8] = include_bytes!("../wallpaper.png");
+const BUNDLED: &[u8] = include_bytes!("../assets/wallpaper.png");
 
 pub struct Wallpaper {
     rs: RenderState,
