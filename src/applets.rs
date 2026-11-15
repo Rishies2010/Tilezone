@@ -19,6 +19,7 @@ use crate::settings::{Hub, Settings};
 use crate::shooter::Shooter;
 use crate::sprites;
 use crate::viewer::Viewer;
+use crate::widgets::*;
 
 pub const ACCENT: Color32 = Color32::from_rgb(192, 96, 255);
 
@@ -117,10 +118,19 @@ pub enum Kind {
     Paint,
     Viewer,
     Settings,
+    Clock,
+    Calendar,
+    Weather,
+    Player,
+    Calculator,
+    Timer,
+    Habits,
+    Countdown,
+    WorldClock,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 11] = [
+    pub const ALL: [Kind; 20] = [
         Kind::System,
         Kind::Todo,
         Kind::Notepad,
@@ -132,6 +142,15 @@ impl Kind {
         Kind::Paint,
         Kind::Viewer,
         Kind::Settings,
+        Kind::Clock,
+        Kind::Calendar,
+        Kind::Weather,
+        Kind::Player,
+        Kind::Calculator,
+        Kind::Timer,
+        Kind::Habits,
+        Kind::Countdown,
+        Kind::WorldClock,
     ];
 
     pub fn name(self) -> &'static str {
@@ -147,6 +166,15 @@ impl Kind {
             Kind::Paint => "Paint",
             Kind::Viewer => "Viewer",
             Kind::Settings => "Settings",
+            Kind::Clock => "Clock",
+            Kind::Calendar => "Calendar",
+            Kind::Weather => "Weather",
+            Kind::Player => "Player",
+            Kind::Calculator => "Calculator",
+            Kind::Timer => "Timer",
+            Kind::Habits => "Habits",
+            Kind::Countdown => "Countdown",
+            Kind::WorldClock => "World Clock",
         }
     }
 
@@ -170,6 +198,15 @@ impl Kind {
             Kind::Paint => Box::new(Paint::new()),
             Kind::Viewer => Box::new(Viewer::new()),
             Kind::Settings => Box::new(Settings::new(hub.clone())),
+            Kind::Clock => Box::new(Clock::new()),
+            Kind::Calendar => Box::new(Calendar::new()),
+            Kind::Weather => Box::new(Weather::new()),
+            Kind::Player => Box::new(Player::new()),
+            Kind::Calculator => Box::new(Calculator::new()),
+            Kind::Timer => Box::new(TimerApp::new()),
+            Kind::Habits => Box::new(Habits::new()),
+            Kind::Countdown => Box::new(Countdown::new()),
+            Kind::WorldClock => Box::new(WorldClock::new()),
         }
     }
 }

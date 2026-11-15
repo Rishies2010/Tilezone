@@ -110,6 +110,15 @@ impl Tile {
         }
     }
 
+    pub fn into_applets(self) -> Vec<Box<dyn Applet>> {
+        self.applets
+    }
+
+    pub fn absorb(&mut self, more: Vec<Box<dyn Applet>>) {
+        self.applets.extend(more);
+        self.active = self.applets.len() - 1;
+    }
+
     pub fn ghost(&mut self, ui: &mut Ui, rect: Rect, radius: f32) {
         let radius = if self.capsule() { (rect.height() / 2.0).min(90.0) } else { radius };
         ui.painter().rect_filled(rect, radius, Color32::from_white_alpha(20));

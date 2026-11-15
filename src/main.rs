@@ -10,6 +10,7 @@ mod store;
 mod tile;
 mod viewer;
 mod warp;
+mod widgets;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -127,6 +128,7 @@ struct App {
     focus: Option<u64>,
     expanded: bool,
     editing: bool,
+    merge: Option<(u64, f64)>,
     drag: Option<(u64, Vec2)>,
     resize: Option<(u64, Vec2)>,
     warp: Warp,
@@ -207,6 +209,7 @@ impl App {
             focus: None,
             expanded: false,
             editing: false,
+            merge: None,
             drag: None,
             resize: None,
             warp: Warp::new(),
@@ -292,6 +295,18 @@ impl App {
             }
         }
         None
+    }
+
+    fn merge_into(&mut self, src: u64, dst: u64) {
+        self.drag = None;
+        self.merge = None;
+        if let Some(i) = self.tiles.iter().position(|t| t.id == src) {
+            let apps = self.tiles.remove(i).into_applets();
+            self.motion.remove(&src);
+            if let Some(t) = self.tiles.iter_mut().find(|t| t.id == dst) {
+                t.absorb(apps);
+            }
+        }
     }
 
     fn add_tile(&mut self, kind: Kind, grid: &Grid) {
@@ -648,6 +663,29 @@ impl eframe::App for App {
                 slots.push(Slot { id: tile.id, rect, glass, style: s, focused, dragged, resized });
             }
 
+            if let Some((did, _)) = self.drag {
+                let center = slots.iter().find(|s| s.id == did).map(|s| s.rect.center());
+                let target = center.and_then(|c| {
+                    slots.iter().find(|s| s.id != did && !self.closing.contains(&s.id) && s.rect.contains(c)).map(|s| s.id)
+                });
+                self.merge = match (target, self.merge) {
+                    (Some(t), Some((o, since))) if t == o => Some((t, since)),
+                    (Some(t), _) => Some((t, time)),
+                    _ => None,
+                };
+            } else {
+                self.merge = None;
+            }
+            let merge_ready = self.merge.filter(|(_, s)| time - *s >= 1.0).map(|(t, _)| t);
+            if let Some((t, since)) = self.merge {
+                if let Some(s) = slots.iter().find(|s| s.id == t) {
+                    let k = ((time - since) as f32).min(1.0);
+                    let pt = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("merge_hint")));
+                    pt.rect_stroke(s.rect, base_style.corner_radius, egui::Stroke::new(2.0 + 3.0 * k, applets::ACCENT.gamma_multiply(0.4 + 0.6 * k)), egui::StrokeKind::Outside);
+                    pt.text(s.rect.center(), Align2::CENTER_CENTER, if k >= 1.0 { "Release to merge" } else { "Hold to merge…" }, applets::bold(14.0), Color32::WHITE);
+                }
+            }
+
             let ghosting = self.focus.is_some();
             let quality = if reduce { LiveBackdropQuality::Performance } else { LiveBackdropQuality::Full };
             {
@@ -751,7 +789,10 @@ impl eframe::App for App {
                     self.drag = Some((id, acc + d));
                 }
                 if out.drag_end {
-                    self.finish_drag(&grid, id);
+                    match merge_ready {
+                        Some(dst) => self.merge_into(id, dst),
+                        None => self.finish_drag(&grid, id),
+                    }
                 }
                 if let Some(d) = out.resize {
                     let acc = self.resize.filter(|(i, _)| *i == id).map_or(Vec2::ZERO, |(_, a)| a);
