@@ -1,8 +1,12 @@
+use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, pos2, vec2, Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Ui};
 
-use crate::applets::{dim, ghost_fill, Applet};
+use serde_json::{json, Value};
+
+use crate::applets::{dim, ghost_fill, Applet, Kind};
 
 const CW: usize = 960;
 const CH: usize = 640;
@@ -31,6 +35,8 @@ pub struct Paint {
     undo: Vec<Vec<u8>>,
     saving: Option<Receiver<bool>>,
     saved_at: f64,
+    uid: u64,
+    unsaved: bool,
 }
 
 impl Paint {
@@ -47,10 +53,13 @@ impl Paint {
             undo: Vec::new(),
             saving: None,
             saved_at: f64::NEG_INFINITY,
+            uid: SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64),
+            unsaved: false,
         }
     }
 
     fn mark(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        self.unsaved = true;
         self.dirty = Some(match self.dirty {
             Some([a, b, c, d]) => [a.min(x0), b.min(y0), c.max(x1), d.max(y1)],
             None => [x0, y0, x1, y1],
@@ -180,12 +189,14 @@ impl Paint {
                 if let Some(prev) = self.undo.pop() {
                     self.px = prev;
                     self.full = true;
+                    self.unsaved = true;
                 }
             }
             if ui.small_button("Clear").clicked() {
                 self.snapshot();
                 self.px.fill(0);
                 self.full = true;
+                self.unsaved = true;
             }
             let label = if ui.input(|i| i.time) - self.saved_at < 2.0 { "Saved" } else { "Save" };
             if ui.small_button(label).clicked() {
@@ -198,6 +209,39 @@ impl Paint {
 impl Applet for Paint {
     fn name(&self) -> &'static str {
         "Paint"
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Paint
+    }
+
+    fn save(&mut self, dir: &Path) -> Option<Value> {
+        let name = format!("paint_{:x}.png", self.uid);
+        if self.unsaved && self.last.is_none() {
+            let file = std::fs::File::create(dir.join(&name)).ok()?;
+            let enc = image::codecs::png::PngEncoder::new_with_quality(
+                std::io::BufWriter::new(file),
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::NoFilter,
+            );
+            image::ImageEncoder::write_image(enc, &self.px, CW as u32, CH as u32, image::ExtendedColorType::Rgba8).ok()?;
+            self.unsaved = false;
+        }
+        Some(json!({ "uid": self.uid, "file": name }))
+    }
+
+    fn restore(&mut self, _ctx: &egui::Context, dir: &Path, data: &Value) {
+        if let Some(uid) = data.get("uid").and_then(|v| v.as_u64()) {
+            self.uid = uid;
+        }
+        let Some(file) = data.get("file").and_then(|v| v.as_str()) else { return };
+        if let Ok(img) = image::open(dir.join(file)) {
+            let rgba = img.to_rgba8();
+            if rgba.width() as usize == CW && rgba.height() as usize == CH {
+                self.px = rgba.into_raw();
+                self.full = true;
+            }
+        }
     }
 
     fn ghost(&mut self, ui: &mut Ui) {

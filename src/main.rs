@@ -5,12 +5,14 @@ mod paint;
 mod pet;
 mod settings;
 mod shooter;
+mod sprites;
+mod store;
 mod tile;
 mod viewer;
 mod warp;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::egui::{
@@ -22,15 +24,15 @@ use egui_glass::{Glass, GlassStyle, LiveBackdrop, LiveBackdropQuality};
 use applets::{ClickSpeed, Clipboard, Kind, Notepad, Photo, Snake, SystemStats, Todo};
 use backdrop::Wallpaper;
 use paint::Paint;
-use pet::{Pet, Platform};
-use settings::{Choice, Hub, Settings};
+use pet::{Input as PetInput, Pet, Platform, Sheet};
+use settings::{Choice, Hub, Prefs, Settings};
 use shooter::Shooter;
+use store::{Saved, Store};
 use tile::{Cell, Out, Tile, View};
 use viewer::Viewer;
 use warp::Warp;
 
 const CELL: f32 = 112.0;
-const GAP: f32 = 12.0;
 const MARGIN: f32 = 24.0;
 const STIFFNESS: f32 = 260.0;
 const DAMPING_RATIO: f32 = 0.82;
@@ -39,23 +41,25 @@ struct Grid {
     origin: Pos2,
     cols: usize,
     rows: usize,
+    gap: f32,
 }
 
 impl Grid {
-    fn new(avail: Rect) -> Self {
-        let fit = |len: f32| (((len - 2.0 * MARGIN + GAP) / (CELL + GAP)).floor() as usize).max(1);
+    fn new(avail: Rect, gap: f32) -> Self {
+        let fit = |len: f32| (((len - 2.0 * MARGIN + gap) / (CELL + gap)).floor() as usize).max(1);
         let (cols, rows) = (fit(avail.width()), fit(avail.height()));
-        let size = vec2(cols as f32, rows as f32) * (CELL + GAP) - vec2(GAP, GAP);
+        let size = vec2(cols as f32, rows as f32) * (CELL + gap) - vec2(gap, gap);
         Self {
             origin: avail.center() - size / 2.0,
             cols,
             rows,
+            gap,
         }
     }
 
     fn rect(&self, (c, r, w, h): Cell) -> Rect {
-        let min = self.origin + vec2(c as f32, r as f32) * (CELL + GAP);
-        let size = vec2(w as f32, h as f32) * CELL + vec2(w as f32 - 1.0, h as f32 - 1.0) * GAP;
+        let min = self.origin + vec2(c as f32, r as f32) * (CELL + self.gap);
+        let size = vec2(w as f32, h as f32) * CELL + vec2(w as f32 - 1.0, h as f32 - 1.0) * self.gap;
         Rect::from_min_size(min, size)
     }
 }
@@ -127,6 +131,28 @@ struct App {
     resize: Option<(u64, Vec2)>,
     warp: Warp,
     pet: Pet,
+    sheet: Sheet,
+    store: Store,
+    last_save: f64,
+}
+
+fn default_tiles(hub: &Hub) -> Vec<Tile> {
+    vec![
+        Tile::new(1, (0, 0, 4, 1), vec![Box::new(SystemStats::new(hub.clone()))]),
+        Tile::new(2, (0, 1, 2, 2), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
+        Tile::new(3, (2, 1, 2, 2), vec![Box::new(Clipboard::new(hub.clone())), Box::new(Paint::new())]),
+        Tile::new(4, (4, 0, 2, 2), vec![Box::new(Photo::new()), Box::new(Viewer::new())]),
+        Tile::new(
+            5,
+            (4, 2, 2, 2),
+            vec![
+                Box::new(ClickSpeed::new()),
+                Box::new(Snake::new(hub.clone())),
+                Box::new(Shooter::new(hub.clone())),
+            ],
+        ),
+        Tile::new(6, (0, 3, 4, 1), vec![Box::new(Settings::new(hub.clone()))]),
+    ]
 }
 
 impl App {
@@ -140,32 +166,31 @@ impl App {
         let mut wallpaper = Wallpaper::new(&rs);
         setup_style(&cc.egui_ctx);
 
-        if let Some(arg) = std::env::args().nth(1) {
-            if let Err(e) = wallpaper.load(Path::new(arg.trim().trim_matches('"'))) {
-                eprintln!("wallpaper: {e}");
+        let mut store = Store::open();
+        let saved = store.load();
+        let hub = settings::hub(saved.as_ref().map_or_else(Prefs::default, |s| s.prefs.clone()));
+
+        let wanted = std::env::args().nth(1).map(|a| PathBuf::from(a.trim().trim_matches('"')));
+        let wanted = wanted.or_else(|| hub.borrow().wallpaper_path.clone());
+        if let Some(path) = wanted {
+            match wallpaper.load(&path) {
+                Ok(()) => hub.borrow_mut().wallpaper_path = Some(path),
+                Err(e) => hub.borrow_mut().error = Some(e),
             }
         }
+        hub.borrow_mut().label = wallpaper.label().to_string();
 
-        let hub = settings::hub();
-        {
-            let mut p = hub.borrow_mut();
-            p.label = wallpaper.label().to_string();
-            p.refraction = glass_style().refraction;
-            p.zoom = glass_style().zoom;
-        }
-
-        let tiles = vec![
-            Tile::new(1, (0, 0, 4, 1), vec![Box::new(SystemStats::new())]),
-            Tile::new(2, (0, 1, 2, 2), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
-            Tile::new(3, (2, 1, 2, 2), vec![Box::new(Clipboard::new()), Box::new(Paint::new())]),
-            Tile::new(4, (4, 0, 2, 2), vec![Box::new(Photo::new()), Box::new(Viewer::new())]),
-            Tile::new(
-                5,
-                (4, 2, 2, 2),
-                vec![Box::new(ClickSpeed::new()), Box::new(Snake::new()), Box::new(Shooter::new())],
+        let (mut tiles, next_id) = match &saved {
+            Some(s) => (
+                s.tiles.iter().filter_map(|t| Tile::restore(t, &hub, &cc.egui_ctx, store.dir())).collect(),
+                s.next_id,
             ),
-            Tile::new(6, (0, 3, 4, 1), vec![Box::new(Settings::new(hub.clone()))]),
-        ];
+            None => (default_tiles(&hub), 6),
+        };
+        if tiles.is_empty() && saved.as_ref().is_some_and(|s| !s.tiles.is_empty()) {
+            tiles = default_tiles(&hub);
+        }
+        let sheet = Sheet::load(&cc.egui_ctx);
 
         Self {
             live,
@@ -175,7 +200,7 @@ impl App {
             tiles,
             motion: HashMap::new(),
             closing: HashSet::new(),
-            next_id: 6,
+            next_id,
             cols: 6,
             rows: 4,
             focus: None,
@@ -183,26 +208,61 @@ impl App {
             editing: false,
             drag: None,
             resize: None,
-            warp: Warp::default(),
+            warp: Warp::new(),
             pet: Pet::new(),
+            sheet,
+            store,
+            last_save: 0.0,
         }
     }
 
     fn sync_prefs(&mut self) {
         let hub = self.hub.clone();
         let mut p = hub.borrow_mut();
-        match p.wallpaper.take() {
-            Some(Choice::Aurora) => {
+        match p.request.take() {
+            Some(Choice::Default) => {
                 self.wallpaper.use_aurora();
+                p.wallpaper_path = None;
                 p.error = None;
             }
-            Some(Choice::File(path)) => p.error = self.wallpaper.load(&path).err(),
+            Some(Choice::File(path)) => match self.wallpaper.load(&path) {
+                Ok(()) => {
+                    p.wallpaper_path = Some(path);
+                    p.error = None;
+                }
+                Err(e) => p.error = Some(e),
+            },
             None => {}
         }
         if let Some(e) = self.wallpaper.take_error() {
             p.error = Some(e);
         }
         p.label = self.wallpaper.label().to_string();
+        let reset = std::mem::take(&mut p.reset_layout);
+        drop(p);
+        if reset {
+            self.tiles = default_tiles(&self.hub);
+            self.next_id = 6;
+            self.closing.clear();
+            self.focus = None;
+            self.expanded = false;
+            self.end_edit();
+        }
+    }
+
+    fn snapshot(&mut self) -> Saved {
+        let dir = self.store.dir().to_path_buf();
+        let closing = &self.closing;
+        Saved {
+            prefs: self.hub.borrow().clone(),
+            tiles: self.tiles.iter_mut().filter(|t| !closing.contains(&t.id)).map(|t| t.snapshot(&dir)).collect(),
+            next_id: self.next_id,
+        }
+    }
+
+    fn save_now(&mut self) {
+        let saved = self.snapshot();
+        self.store.save(&saved);
     }
 
     fn is_free(&self, skip: Option<u64>, cell: Cell) -> bool {
@@ -272,7 +332,7 @@ impl App {
         let Some((_, d)) = self.drag.take() else { return };
         let Some(cell) = self.cell_of(id) else { return };
         let min = grid.rect(cell).translate(d).min;
-        let step = CELL + GAP;
+        let step = CELL + grid.gap;
         let col = (((min.x - grid.origin.x) / step).round() as i32).clamp(0, self.cols.saturating_sub(cell.2) as i32);
         let row = (((min.y - grid.origin.y) / step).round() as i32).clamp(0, self.rows.saturating_sub(cell.3) as i32);
         self.set_cell(id, (col as usize, row as usize, cell.2, cell.3));
@@ -282,9 +342,9 @@ impl App {
         let Some((_, d)) = self.resize.take() else { return };
         let Some(cell) = self.cell_of(id) else { return };
         let size = grid.rect(cell).size() + d;
-        let step = CELL + GAP;
-        let w = (((size.x + GAP) / step).round() as i32).clamp(1, self.cols.saturating_sub(cell.0).max(1) as i32);
-        let h = (((size.y + GAP) / step).round() as i32).clamp(1, self.rows.saturating_sub(cell.1).max(1) as i32);
+        let step = CELL + grid.gap;
+        let w = (((size.x + grid.gap) / step).round() as i32).clamp(1, self.cols.saturating_sub(cell.0).max(1) as i32);
+        let h = (((size.y + grid.gap) / step).round() as i32).clamp(1, self.rows.saturating_sub(cell.1).max(1) as i32);
         self.set_cell(id, (cell.0, cell.1, w as usize, h as usize));
     }
 
@@ -414,12 +474,21 @@ fn visuals() -> egui::Visuals {
     v
 }
 
-fn wheel_amount(ctx: &egui::Context) -> f32 {
+fn mod_held(m: &egui::Modifiers, mode: usize) -> bool {
+    match mode {
+        1 => m.ctrl && m.shift,
+        2 => m.shift && !m.ctrl,
+        3 => m.alt,
+        _ => m.ctrl && !m.shift,
+    }
+}
+
+fn wheel_amount(ctx: &egui::Context, mode: usize) -> f32 {
     ctx.input(|i| {
         i.events
             .iter()
             .map(|e| match e {
-                egui::Event::MouseWheel { unit, delta, modifiers, .. } if modifiers.ctrl => {
+                egui::Event::MouseWheel { unit, delta, modifiers, .. } if mod_held(modifiers, mode) => {
                     let d = delta.x + delta.y;
                     match unit {
                         egui::MouseWheelUnit::Point => d / 40.0,
@@ -451,33 +520,30 @@ impl eframe::App for App {
             }
         }
 
-        let (reduce, pet_on, zoom, refraction) = {
-            let p = self.hub.borrow();
-            (p.reduce, p.pet, p.zoom, p.refraction)
-        };
-        let mut base_style = self.style;
-        base_style.zoom = zoom;
-        base_style.refraction = refraction;
+        let prefs = self.hub.borrow().clone();
+        let reduce = prefs.reduce;
+        let base_style = prefs.glass(self.style);
         glass::publish(&ctx, base_style);
 
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let avail = ui.max_rect();
-            let grid = Grid::new(avail);
+            let grid = Grid::new(avail, prefs.gap);
             self.cols = grid.cols;
             self.rows = grid.rows;
             self.relocate();
 
             let full = avail.shrink(MARGIN);
             let (time, dt, focused) = ctx.input(|i| (i.time, i.stable_dt.min(0.05), i.viewport().focused.unwrap_or(true)));
-            let ctrl = ctx.input(|i| i.modifiers.ctrl);
+            let ctrl = ctx.input(|i| mod_held(&i.modifiers, prefs.scroll_mod));
             let pointer = ctx.pointer_hover_pos();
             let fps = if !focused {
                 8
             } else if reduce {
                 24
             } else {
-                60
+                prefs.fps as u32
             };
+            self.warp.strength = prefs.warp_strength;
 
             self.wallpaper.update(&ctx, time, fps);
             self.warp.prune(time);
@@ -523,7 +589,7 @@ impl eframe::App for App {
                 }
             }
 
-            let amount = wheel_amount(&ctx);
+            let amount = wheel_amount(&ctx, prefs.scroll_mod);
             if amount != 0.0 && !self.editing {
                 if let Some(p) = pointer {
                     let hit = match self.focus.filter(|_| self.expanded) {
@@ -553,7 +619,7 @@ impl eframe::App for App {
                     glass = rect.expand(0.5 * (t * 17.0 + phase).sin());
                 } else if dragged || resized {
                     glass = rect.expand(6.0);
-                } else if !focused && !reduce {
+                } else if !focused && !reduce && prefs.hover_fx {
                     let target = pointer.map_or(0.0, |p| (1.0 - distance_to(rect, p) / 170.0).clamp(0.0, 1.0));
                     prox = ctx.animate_value_with_time(Id::unique(("prox", tile.id)), target, 0.18);
                     let half = rect.size() / 2.0;
@@ -623,6 +689,8 @@ impl eframe::App for App {
                 outs.push((slot.id, out));
             }
 
+            let pet_click = ctx.input(|i| if i.pointer.primary_pressed() { i.pointer.interact_pos() } else { None });
+            let on_pet = prefs.pet && pet_click.is_some_and(|c| self.pet.hit(c, prefs.pet_scale));
             let press = ctx.input(|i| {
                 let p = i.pointer.hover_pos()?;
                 if i.pointer.button_pressed(PointerButton::Primary) {
@@ -633,7 +701,7 @@ impl eframe::App for App {
                     None
                 }
             });
-            if let (Some((p, right)), false, false) = (press, self.editing, reduce) {
+            if let (Some((p, right)), false, false) = (press, self.editing, reduce || !prefs.warp || on_pet) {
                 let on_tile = outs.iter().any(|(_, o)| o.body_hovered);
                 let on_backdrop = ctx.layer_id_at(p).is_none_or(|l| l.order == Order::Background);
                 if on_tile || on_backdrop {
@@ -691,15 +759,21 @@ impl eframe::App for App {
                 }
             }
 
-            if pet_on {
+            if prefs.pet {
                 let plats = self.platforms(&slots, avail);
                 let active = ctx.input(|i| i.pointer.is_moving() || i.pointer.any_down() || !i.events.is_empty());
-                self.pet.update(dt, &plats, avail, active);
+                let input = PetInput {
+                    cursor: pointer,
+                    click: pet_click,
+                    active,
+                    follow: prefs.pet_follow && !self.editing,
+                    interval: prefs.pet_interval,
+                    scale: prefs.pet_scale,
+                };
+                self.pet.update(dt, &plats, avail, &input);
                 let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("pet")));
-                self.pet.paint(&painter);
-                if self.pet.animating() {
-                    ctx.request_repaint_after(Duration::from_millis(if reduce { 33 } else { 16 }));
-                }
+                self.pet.paint(&painter, &self.sheet, prefs.pet_scale);
+                ctx.request_repaint_after(self.pet.repaint_after(reduce));
             }
 
             if self.editing {
@@ -736,7 +810,17 @@ impl eframe::App for App {
                     self.end_edit();
                 }
             }
+
+            if time - self.last_save >= 2.0 {
+                self.last_save = time;
+                self.save_now();
+            }
+            ctx.request_repaint_after(Duration::from_secs(2));
         });
+    }
+
+    fn on_exit(&mut self) {
+        self.save_now();
     }
 }
 

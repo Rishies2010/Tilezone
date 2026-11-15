@@ -1,8 +1,13 @@
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Key, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 
-use crate::applets::{bold, dim, ghost_fill, Applet, ACCENT};
+use serde_json::{json, Value};
+
+use crate::applets::{dim, ghost_fill, overlay, Applet, Kind};
+use crate::settings::Hub;
+use crate::sprites;
 
 const W: f32 = 300.0;
 const H: f32 = 400.0;
@@ -44,10 +49,12 @@ pub struct Shooter {
     hit: f32,
     last: f64,
     rng: u64,
+    hub: Hub,
+    enemy_tex: Option<egui::TextureHandle>,
 }
 
 impl Shooter {
-    pub fn new() -> Self {
+    pub fn new(hub: Hub) -> Self {
         let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(11, |d| d.as_nanos() as u64) | 1;
         let mut s = Self {
             phase: Phase::Idle,
@@ -64,6 +71,8 @@ impl Shooter {
             hit: 0.0,
             last: 0.0,
             rng: seed,
+            hub,
+            enemy_tex: None,
         };
         for _ in 0..40 {
             let star = (pos2(s.rand() * W, s.rand() * H), 0.3 + s.rand() * 0.7);
@@ -129,9 +138,10 @@ impl Shooter {
         }
         self.bullets.retain(|b| b.y > -10.0);
 
+        let level = self.hub.borrow().shooter_difficulty.clamp(0.5, 3.0);
         self.spawn -= dt;
         if self.spawn <= 0.0 {
-            self.spawn = (0.95 - self.score as f32 * 0.012).max(0.3);
+            self.spawn = (0.95 - self.score as f32 * 0.012).max(0.3) / level;
             let x = 20.0 + self.rand() * (W - 40.0);
             let hp = if self.score > 12 && self.rand() < 0.3 { 2 } else { 1 };
             let drift = (self.rand() - 0.5) * 60.0;
@@ -139,7 +149,7 @@ impl Shooter {
             self.enemies.push(Enemy { pos: pos2(x, -16.0), hp, drift, seed });
         }
 
-        let speed = 52.0 + self.score as f32 * 1.4;
+        let speed = (52.0 + self.score as f32 * 1.4) * level.sqrt();
         for e in &mut self.enemies {
             e.pos.y += speed * dt;
             e.seed += dt * 2.0;
@@ -199,6 +209,18 @@ impl Applet for Shooter {
         "Space shooter"
     }
 
+    fn kind(&self) -> Kind {
+        Kind::Shooter
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        Some(json!({ "best": self.best }))
+    }
+
+    fn restore(&mut self, _ctx: &egui::Context, _dir: &Path, data: &Value) {
+        self.best = data.get("best").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    }
+
     fn ghost(&mut self, ui: &mut Ui) {
         ghost_fill(ui);
     }
@@ -246,15 +268,17 @@ impl Applet for Shooter {
             let (a, c) = (to_screen(*b), to_screen(*b + vec2(0.0, 9.0)));
             p.line_segment([a, c], Stroke::new(2.4 * scale.max(0.6), Color32::WHITE));
         }
+        let enemy = self
+            .enemy_tex
+            .get_or_insert_with(|| sprites::load(ui.ctx(), "enemy", sprites::ENEMY, egui::TextureOptions::LINEAR));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         for e in &self.enemies {
-            let c = to_screen(e.pos);
-            let r = 11.0 * scale;
-            let color = if e.hp > 1 { Color32::from_rgb(255, 120, 190) } else { ACCENT };
-            p.add(Shape::convex_polygon(
-                vec![c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)],
-                color,
-                Stroke::new(1.0, Color32::from_white_alpha(120)),
-            ));
+            let (size, tint) = if e.hp > 1 {
+                (36.0, Color32::from_rgb(255, 200, 150))
+            } else {
+                (28.0, Color32::WHITE)
+            };
+            p.image(enemy.id(), Rect::from_center_size(to_screen(e.pos), Vec2::splat(size * scale)), uv, tint);
         }
         for s in &self.sparks {
             p.circle_filled(to_screen(s.pos), 1.8 * scale.max(0.6), dim((s.life * 380.0).min(235.0) as u8));
@@ -275,14 +299,10 @@ impl Applet for Shooter {
             ));
         }
 
-        let msg = match self.phase {
-            Phase::Idle => Some("Click to play"),
-            Phase::Dead => Some("Game over · click to retry"),
-            Phase::Running => None,
-        };
-        if let Some(msg) = msg {
-            p.rect_filled(board, 16.0, Color32::from_black_alpha(90));
-            p.text(board.center(), Align2::CENTER_CENTER, msg, bold(14.0), Color32::WHITE);
+        match self.phase {
+            Phase::Idle => overlay(&p, board, "Space shooter", "Click to play"),
+            Phase::Dead => overlay(&p, board, "Game over", "Click to retry"),
+            Phase::Running => {}
         }
 
         let lives = "●".repeat(self.lives as usize);

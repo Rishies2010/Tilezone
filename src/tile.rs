@@ -4,12 +4,25 @@ use eframe::egui::{
 };
 use egui_glass::GlassStyle;
 
+use std::path::Path;
+
 use crate::applets::{bold, Applet};
 use crate::glass;
+use crate::settings::Hub;
+use crate::store::{AppletSave, TileSave};
 
 pub type Cell = (usize, usize, usize, usize);
 
 const HEADER: f32 = 22.0;
+const TITLE_INSET: Vec2 = vec2(14.0, 6.0);
+
+fn top_offset(titled: bool) -> f32 {
+    if titled {
+        HEADER + 14.0
+    } else {
+        0.0
+    }
+}
 
 pub struct View {
     pub expanded: bool,
@@ -39,6 +52,41 @@ pub struct Tile {
 }
 
 impl Tile {
+    pub fn restore(save: &TileSave, hub: &Hub, ctx: &egui::Context, dir: &Path) -> Option<Self> {
+        let applets: Vec<Box<dyn Applet>> = save
+            .applets
+            .iter()
+            .map(|s| {
+                let mut applet = s.kind.build(hub);
+                if let Some(data) = &s.data {
+                    applet.restore(ctx, dir, data);
+                }
+                applet
+            })
+            .collect();
+        if applets.is_empty() {
+            return None;
+        }
+        let c = save.cell;
+        let mut tile = Self::new(save.id, (c[0], c[1], c[2], c[3]), applets);
+        tile.active = save.active.min(tile.applets.len() - 1);
+        Some(tile)
+    }
+
+    pub fn snapshot(&mut self, dir: &Path) -> TileSave {
+        let c = self.cell;
+        TileSave {
+            id: self.id,
+            cell: [c.0, c.1, c.2, c.3],
+            active: self.active,
+            applets: self
+                .applets
+                .iter_mut()
+                .map(|a| AppletSave { kind: a.kind(), data: a.save(dir) })
+                .collect(),
+        }
+    }
+
     pub fn new(id: u64, cell: Cell, applets: Vec<Box<dyn Applet>>) -> Self {
         Self {
             id,
@@ -71,7 +119,7 @@ impl Tile {
             return;
         }
         let inner = rect.shrink(self.pad(rect));
-        let top = if self.applets[self.active].titled() { HEADER + 8.0 } else { 0.0 };
+        let top = top_offset(self.applets[self.active].titled());
         let mut body = Rect::from_min_max(pos2(inner.min.x, inner.min.y + top), inner.max);
         if self.applets.len() > 1 {
             body.max.y -= 14.0;
@@ -133,7 +181,7 @@ impl Tile {
         let titled = self.applets[self.active].titled();
         if titled {
             ui.painter().text(
-                inner.left_top() + vec2(0.0, HEADER / 2.0),
+                inner.left_top() + vec2(TITLE_INSET.x, HEADER / 2.0 + TITLE_INSET.y),
                 Align2::LEFT_CENTER,
                 self.applets[self.active].name(),
                 bold(12.5),
@@ -142,10 +190,33 @@ impl Tile {
         }
 
         let many = self.applets.len() > 1;
+
+        let top = top_offset(titled);
+        let mut body = Rect::from_min_max(pos2(inner.min.x, inner.min.y + top), inner.max);
+        if many {
+            body.max.y -= 14.0;
+        }
+
+        let pos = ctx.animate_value_with_time(Id::unique((self.id, "slide")), self.active as f32, 0.25);
+        for (i, applet) in self.applets.iter_mut().enumerate() {
+            let off = i as f32 - pos;
+            if off.abs() >= 1.0 {
+                continue;
+            }
+            let r = body.translate(vec2(off * body.width(), 0.0));
+            let mut child = ui.new_child(UiBuilder::new().id_salt((self.id, i)).max_rect(r));
+            child.set_clip_rect(body.intersect(ui.clip_rect()));
+            child.set_opacity(1.0 - off.abs());
+            applet.ui(&mut child);
+        }
+
         let menu_open = egui::Popup::is_any_open(&ctx);
         let fade = ctx.animate_bool_with_time(Id::unique((self.id, "hover")), hovering || menu_open, 0.15);
         if fade > 0.02 {
-            let expand_rect = Rect::from_min_size(pos2(inner.max.x - HEADER, inner.min.y), vec2(HEADER, HEADER));
+            let expand_rect = Rect::from_min_size(
+                pos2(inner.max.x - HEADER - 6.0, inner.min.y + TITLE_INSET.y),
+                vec2(HEADER, HEADER),
+            );
             let resp = icon_button(ui, expand_rect, (self.id, "expand"), fade, |p, r, c| {
                 expand_icon(p, r, c, view.expanded)
             });
@@ -168,25 +239,6 @@ impl Tile {
                     self.active = i;
                 }
             }
-        }
-
-        let top = if titled { HEADER + 8.0 } else { 0.0 };
-        let mut body = Rect::from_min_max(pos2(inner.min.x, inner.min.y + top), inner.max);
-        if many {
-            body.max.y -= 14.0;
-        }
-
-        let pos = ctx.animate_value_with_time(Id::unique((self.id, "slide")), self.active as f32, 0.25);
-        for (i, applet) in self.applets.iter_mut().enumerate() {
-            let off = i as f32 - pos;
-            if off.abs() >= 1.0 {
-                continue;
-            }
-            let r = body.translate(vec2(off * body.width(), 0.0));
-            let mut child = ui.new_child(UiBuilder::new().id_salt((self.id, i)).max_rect(r));
-            child.set_clip_rect(body.intersect(ui.clip_rect()));
-            child.set_opacity(1.0 - off.abs());
-            applet.ui(&mut child);
         }
 
         if many {

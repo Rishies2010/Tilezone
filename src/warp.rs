@@ -12,12 +12,16 @@ struct Shock {
     pull: bool,
 }
 
-#[derive(Default)]
 pub struct Warp {
     shocks: Vec<Shock>,
+    pub strength: f32,
 }
 
 impl Warp {
+    pub fn new() -> Self {
+        Self { shocks: Vec::new(), strength: 1.0 }
+    }
+
     pub fn push(&mut self, pos: Pos2, time: f64, pull: bool) {
         self.shocks.push(Shock { pos, t0: time, pull });
         if self.shocks.len() > 6 {
@@ -60,7 +64,7 @@ impl Warp {
 
             out += (dir * wave + well) * sign;
         }
-        out
+        out * self.strength
     }
 
     pub fn draw_rings(&self, ctx: &egui::Context, time: f64) {

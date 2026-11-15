@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Key, Rect, Sense, Stroke, TextureHandle, Ui, Vec2};
 
-use crate::applets::{bold, dim, ghost_fill, Applet, Picker};
+use serde_json::{json, Value};
+
+use crate::applets::{bold, dim, ghost_fill, Applet, Kind, Picker};
 
 const EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
 
@@ -90,6 +92,22 @@ fn arrow(ui: &Ui, center: egui::Pos2, dir: f32, hovered: bool) {
 impl Applet for Viewer {
     fn name(&self) -> &'static str {
         "Viewer"
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Viewer
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        self.files.get(self.index).map(|p| json!({ "path": p.to_string_lossy() }))
+    }
+
+    fn restore(&mut self, ctx: &egui::Context, _dir: &Path, data: &Value) {
+        if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+            if Path::new(path).exists() {
+                self.open(ctx, Path::new(path));
+            }
+        }
     }
 
     fn titled(&self) -> bool {
