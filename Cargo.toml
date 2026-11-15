@@ -1,5 +1,5 @@
 [package]
-name = "glass_spike"
+name = "tilezone"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,7 +7,8 @@ edition = "2021"
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
 egui = "0.37"
-egui_glass = "0.2.0"
+egui_glass = { path = "vendor/egui_glass" }
 env_logger = "0.11"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 sysinfo = "0.40.3"

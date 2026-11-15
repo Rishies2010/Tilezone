@@ -1,9 +1,11 @@
 use eframe::egui::{
-    self, layers::ShapeIdx, pos2, vec2, Align2, Color32, Id, Painter, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2,
+    self, layers::ShapeIdx, pos2, vec2, Align2, Color32, Id, Painter, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
+    UiBuilder, Vec2,
 };
 use egui_glass::GlassStyle;
 
 use crate::applets::{bold, Applet};
+use crate::glass;
 
 pub type Cell = (usize, usize, usize, usize);
 
@@ -52,8 +54,31 @@ impl Tile {
         self.cell.3 == 1 && self.cell.2 >= 2
     }
 
-    pub fn on_drop(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
-        self.applets[self.active].on_drop(ctx, path)
+    fn pad(&self, rect: Rect) -> f32 {
+        if self.capsule() {
+            (rect.height() * 0.14).clamp(16.0, 30.0)
+        } else {
+            16.0
+        }
+    }
+
+    pub fn ghost(&mut self, ui: &mut Ui, rect: Rect, radius: f32) {
+        let radius = if self.capsule() { (rect.height() / 2.0).min(90.0) } else { radius };
+        ui.painter().rect_filled(rect, radius, Color32::from_white_alpha(20));
+        ui.painter()
+            .rect_stroke(rect, radius, Stroke::new(1.0, Color32::from_white_alpha(44)), StrokeKind::Inside);
+        if rect.width() < 70.0 || rect.height() < 70.0 {
+            return;
+        }
+        let inner = rect.shrink(self.pad(rect));
+        let top = if self.applets[self.active].titled() { HEADER + 8.0 } else { 0.0 };
+        let mut body = Rect::from_min_max(pos2(inner.min.x, inner.min.y + top), inner.max);
+        if self.applets.len() > 1 {
+            body.max.y -= 14.0;
+        }
+        let mut child = ui.new_child(UiBuilder::new().id_salt((self.id, "ghost")).max_rect(body));
+        child.set_clip_rect(body.intersect(ui.clip_rect()));
+        self.applets[self.active].ghost(&mut child);
     }
 
     pub fn scroll(&mut self, amount: f32, now: f64) {
@@ -86,6 +111,10 @@ impl Tile {
         }
         egui_glass::paint_glass(ui, glass, &style);
 
+        if rect.width() < 70.0 || rect.height() < 70.0 {
+            return out;
+        }
+
         let hovering = !view.editing && ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p));
 
         if !view.editing {
@@ -100,8 +129,7 @@ impl Tile {
             }
         }
 
-        let pad = if capsule { (rect.height() * 0.14).clamp(16.0, 30.0) } else { 16.0 };
-        let inner = rect.shrink(pad);
+        let inner = rect.shrink(self.pad(rect));
         let titled = self.applets[self.active].titled();
         if titled {
             ui.painter().text(
@@ -114,7 +142,8 @@ impl Tile {
         }
 
         let many = self.applets.len() > 1;
-        let fade = ctx.animate_bool_with_time(Id::unique((self.id, "hover")), hovering, 0.15);
+        let menu_open = egui::Popup::is_any_open(&ctx);
+        let fade = ctx.animate_bool_with_time(Id::unique((self.id, "hover")), hovering || menu_open, 0.15);
         if fade > 0.02 {
             let expand_rect = Rect::from_min_size(pos2(inner.max.x - HEADER, inner.min.y), vec2(HEADER, HEADER));
             let resp = icon_button(ui, expand_rect, (self.id, "expand"), fade, |p, r, c| {
@@ -127,7 +156,7 @@ impl Tile {
                 let resp = icon_button(ui, drop_rect, (self.id, "drop"), fade, chevron_icon);
                 let names: Vec<&'static str> = self.applets.iter().map(|a| a.name()).collect();
                 let mut pick = None;
-                egui::Popup::menu(&resp).show(|ui| {
+                glass::menu(&resp, |ui| {
                     for (i, name) in names.iter().enumerate() {
                         if ui.selectable_label(i == self.active, *name).clicked() {
                             pick = Some(i);

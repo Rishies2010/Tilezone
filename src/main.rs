@@ -1,19 +1,39 @@
 mod applets;
+mod backdrop;
+mod glass;
+mod paint;
+mod pet;
+mod settings;
+mod shooter;
 mod tile;
+mod viewer;
+mod warp;
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::Duration;
 
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, FontFamily, FontId, Id, LayerId, Order, PointerButton, Pos2, Rect, Sense,
-    Stroke, TextStyle, Vec2,
+    TextStyle, Vec2,
 };
-use egui_glass::{Glass, GlassStyle};
+use egui_glass::{Glass, GlassStyle, LiveBackdrop, LiveBackdropQuality};
 
 use applets::{ClickSpeed, Clipboard, Kind, Notepad, Photo, Snake, SystemStats, Todo};
+use backdrop::Wallpaper;
+use paint::Paint;
+use pet::{Pet, Platform};
+use settings::{Choice, Hub, Settings};
+use shooter::Shooter;
 use tile::{Cell, Out, Tile, View};
+use viewer::Viewer;
+use warp::Warp;
 
-const MAX_SIDE: u32 = 3840;
 const CELL: f32 = 112.0;
 const GAP: f32 = 12.0;
 const MARGIN: f32 = 24.0;
+const STIFFNESS: f32 = 260.0;
+const DAMPING_RATIO: f32 = 0.82;
 
 struct Grid {
     origin: Pos2,
@@ -44,74 +64,145 @@ fn overlaps(a: Cell, b: Cell) -> bool {
     a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
 }
 
-struct Ripple {
-    pos: Pos2,
-    t0: f64,
-    right: bool,
+#[derive(Clone, Copy)]
+struct Motion {
+    p: [f32; 4],
+    v: [f32; 4],
+}
+
+impl Motion {
+    fn at(r: Rect) -> Self {
+        Self { p: [r.min.x, r.min.y, r.max.x, r.max.y], v: [0.0; 4] }
+    }
+
+    fn rect(&self) -> Rect {
+        Rect::from_min_max(pos2(self.p[0], self.p[1]), pos2(self.p[2], self.p[3]))
+    }
+
+    fn step(&mut self, target: Rect, dt: f32, direct: bool) -> bool {
+        let t = [target.min.x, target.min.y, target.max.x, target.max.y];
+        if direct {
+            *self = Self::at(target);
+            return false;
+        }
+        let k = STIFFNESS;
+        let c = 2.0 * DAMPING_RATIO * k.sqrt();
+        let steps = (dt / (1.0 / 240.0)).ceil().max(1.0) as usize;
+        let h = dt / steps as f32;
+        for _ in 0..steps {
+            for i in 0..4 {
+                self.v[i] += (k * (t[i] - self.p[i]) - c * self.v[i]) * h;
+                self.p[i] += self.v[i] * h;
+            }
+        }
+        (0..4).any(|i| (t[i] - self.p[i]).abs() > 0.05 || self.v[i].abs() > 0.5)
+    }
+}
+
+struct Slot {
+    id: u64,
+    rect: Rect,
+    glass: Rect,
+    style: GlassStyle,
+    focused: bool,
+    dragged: bool,
+    resized: bool,
 }
 
 struct App {
-    rs: eframe::egui_wgpu::RenderState,
+    live: LiveBackdrop,
+    wallpaper: Wallpaper,
+    hub: Hub,
     style: GlassStyle,
     tiles: Vec<Tile>,
+    motion: HashMap<u64, Motion>,
+    closing: HashSet<u64>,
     next_id: u64,
     cols: usize,
     rows: usize,
-    last_size: Vec2,
     focus: Option<u64>,
     expanded: bool,
     editing: bool,
     drag: Option<(u64, Vec2)>,
     resize: Option<(u64, Vec2)>,
-    ripples: Vec<Ripple>,
+    warp: Warp,
+    pet: Pet,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let rs = cc
-            .wgpu_render_state
-            .clone()
-            .expect("eframe must use the wgpu renderer");
-
+        let rs = cc.wgpu_render_state.clone().expect("eframe must use the wgpu renderer");
         egui_glass::init(&rs, 1);
-        egui_glass::set_backdrop(&cc.egui_ctx, &rs, &fallback_wallpaper());
-        setup_fonts(&cc.egui_ctx);
+
+        let fonts = font_definitions();
+        cc.egui_ctx.set_fonts(fonts.clone());
+        let live = LiveBackdrop::new(&rs, Some(fonts));
+        let mut wallpaper = Wallpaper::new(&rs);
         setup_style(&cc.egui_ctx);
 
-        let app = Self {
-            rs,
+        if let Some(arg) = std::env::args().nth(1) {
+            if let Err(e) = wallpaper.load(Path::new(arg.trim().trim_matches('"'))) {
+                eprintln!("wallpaper: {e}");
+            }
+        }
+
+        let hub = settings::hub();
+        {
+            let mut p = hub.borrow_mut();
+            p.label = wallpaper.label().to_string();
+            p.refraction = glass_style().refraction;
+            p.zoom = glass_style().zoom;
+        }
+
+        let tiles = vec![
+            Tile::new(1, (0, 0, 4, 1), vec![Box::new(SystemStats::new())]),
+            Tile::new(2, (0, 1, 2, 2), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
+            Tile::new(3, (2, 1, 2, 2), vec![Box::new(Clipboard::new()), Box::new(Paint::new())]),
+            Tile::new(4, (4, 0, 2, 2), vec![Box::new(Photo::new()), Box::new(Viewer::new())]),
+            Tile::new(
+                5,
+                (4, 2, 2, 2),
+                vec![Box::new(ClickSpeed::new()), Box::new(Snake::new()), Box::new(Shooter::new())],
+            ),
+            Tile::new(6, (0, 3, 4, 1), vec![Box::new(Settings::new(hub.clone()))]),
+        ];
+
+        Self {
+            live,
+            wallpaper,
+            hub,
             style: glass_style(),
-            tiles: vec![
-                Tile::new(1, (0, 0, 4, 1), vec![Box::new(SystemStats::new())]),
-                Tile::new(2, (0, 1, 2, 2), vec![Box::new(Todo::new()), Box::new(Notepad::new())]),
-                Tile::new(3, (2, 1, 2, 2), vec![Box::new(Clipboard::new())]),
-                Tile::new(4, (4, 0, 2, 2), vec![Box::new(Photo::new())]),
-                Tile::new(5, (4, 2, 2, 2), vec![Box::new(ClickSpeed::new()), Box::new(Snake::new())]),
-            ],
-            next_id: 5,
+            tiles,
+            motion: HashMap::new(),
+            closing: HashSet::new(),
+            next_id: 6,
             cols: 6,
             rows: 4,
-            last_size: Vec2::ZERO,
             focus: None,
             expanded: false,
             editing: false,
             drag: None,
             resize: None,
-            ripples: Vec::new(),
-        };
-
-        let path = std::env::args().nth(1).unwrap_or_else(|| "wallpaper.jpg".into());
-        app.set_wallpaper(&cc.egui_ctx, &path);
-        app
+            warp: Warp::default(),
+            pet: Pet::new(),
+        }
     }
 
-    fn set_wallpaper(&self, ctx: &egui::Context, path: &str) {
-        match load_image(path.trim().trim_matches('"')) {
-            Ok(img) => {
-                egui_glass::set_backdrop(ctx, &self.rs, &img);
+    fn sync_prefs(&mut self) {
+        let hub = self.hub.clone();
+        let mut p = hub.borrow_mut();
+        match p.wallpaper.take() {
+            Some(Choice::Aurora) => {
+                self.wallpaper.use_aurora();
+                p.error = None;
             }
-            Err(e) => eprintln!("wallpaper: {e}"),
+            Some(Choice::File(path)) => p.error = self.wallpaper.load(&path).err(),
+            None => {}
         }
+        if let Some(e) = self.wallpaper.take_error() {
+            p.error = Some(e);
+        }
+        p.label = self.wallpaper.label().to_string();
     }
 
     fn is_free(&self, skip: Option<u64>, cell: Cell) -> bool {
@@ -120,7 +211,7 @@ impl App {
             && self
                 .tiles
                 .iter()
-                .filter(|t| Some(t.id) != skip)
+                .filter(|t| Some(t.id) != skip && !self.closing.contains(&t.id))
                 .all(|t| !overlaps(t.cell, cell))
     }
 
@@ -141,11 +232,13 @@ impl App {
         None
     }
 
-    fn add_tile(&mut self, kind: Kind) {
+    fn add_tile(&mut self, kind: Kind, grid: &Grid) {
         let span = kind.span();
         if let Some(cell) = self.find_spot(None, &[span, (2, 1), (1, 1)]) {
             self.next_id += 1;
-            self.tiles.push(Tile::new(self.next_id, cell, vec![kind.build()]));
+            let seed = Rect::from_center_size(grid.rect(cell).center(), vec2(6.0, 6.0));
+            self.motion.insert(self.next_id, Motion::at(seed));
+            self.tiles.push(Tile::new(self.next_id, cell, vec![kind.build(&self.hub)]));
         }
     }
 
@@ -200,6 +293,42 @@ impl App {
         self.drag = None;
         self.resize = None;
     }
+
+    fn platforms(&self, slots: &[Slot], bounds: Rect) -> Vec<Platform> {
+        let mut out = vec![Platform { id: 0, x0: bounds.min.x + 8.0, x1: bounds.max.x - 8.0, y: bounds.max.y - 6.0 }];
+        let live: Vec<&Slot> = slots
+            .iter()
+            .filter(|s| !self.closing.contains(&s.id) && (self.focus.is_none() || s.focused))
+            .collect();
+        for s in &live {
+            let y = s.rect.min.y;
+            let mut spans = vec![(s.rect.min.x + 20.0, s.rect.max.x - 20.0)];
+            for o in live.iter().filter(|o| o.id != s.id && o.rect.min.y < y && o.rect.max.y > y) {
+                spans = spans
+                    .into_iter()
+                    .flat_map(|(x0, x1)| {
+                        if o.rect.max.x <= x0 || o.rect.min.x >= x1 {
+                            return vec![(x0, x1)];
+                        }
+                        let mut v = Vec::new();
+                        if o.rect.min.x > x0 {
+                            v.push((x0, o.rect.min.x));
+                        }
+                        if o.rect.max.x < x1 {
+                            v.push((o.rect.max.x, x1));
+                        }
+                        v
+                    })
+                    .collect();
+            }
+            for (k, (x0, x1)) in spans.into_iter().enumerate() {
+                if x1 - x0 >= 36.0 {
+                    out.push(Platform { id: s.id * 16 + 1 + k as u64, x0, x1, y });
+                }
+            }
+        }
+        out
+    }
 }
 
 fn glass_style() -> GlassStyle {
@@ -216,11 +345,12 @@ fn glass_style() -> GlassStyle {
         specular: 0.9,
         border: 0.5,
         shadow: 0.0,
+        zoom: 1.08,
         ..GlassStyle::clear()
     }
 }
 
-fn setup_fonts(ctx: &egui::Context) {
+fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "inter".into(),
@@ -241,8 +371,7 @@ fn setup_fonts(ctx: &egui::Context) {
     let mut bold = fonts.families[&FontFamily::Proportional].clone();
     bold[0] = "inter_bold".into();
     fonts.families.insert(FontFamily::Name("InterBold".into()), bold);
-
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -285,38 +414,6 @@ fn visuals() -> egui::Visuals {
     v
 }
 
-fn load_image(path: &str) -> Result<egui::ColorImage, String> {
-    let mut img = image::open(path).map_err(|e| e.to_string())?;
-    if img.width().max(img.height()) > MAX_SIDE {
-        img = img.thumbnail(MAX_SIDE, MAX_SIDE);
-    }
-    let rgba = img.to_rgba8();
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
-}
-
-// only shown until a real image loads
-fn fallback_wallpaper() -> egui::ColorImage {
-    const N: usize = 1024;
-    let mut img = egui::ColorImage::filled([N, N], Color32::BLACK);
-    for y in 0..N {
-        for x in 0..N {
-            let mut v = 20 + (x + y) / 16;
-            if x % 64 < 2 || y % 64 < 2 {
-                v += 40;
-            }
-            let v = v as u8;
-            img[(x, y)] = Color32::from_rgb(v, v, v + 15);
-        }
-    }
-    img
-}
-
-fn animate_rect(ctx: &egui::Context, id: u64, r: Rect, secs: f32) -> Rect {
-    let a = |k: &str, v: f32| ctx.animate_value_with_time(Id::unique(("rect", id, k.to_string())), v, secs);
-    Rect::from_min_max(pos2(a("x0", r.min.x), a("y0", r.min.y)), pos2(a("x1", r.max.x), a("y1", r.max.y)))
-}
-
 fn wheel_amount(ctx: &egui::Context) -> f32 {
     ctx.input(|i| {
         i.events
@@ -341,47 +438,10 @@ fn distance_to(r: Rect, p: Pos2) -> f32 {
     dx.hypot(dy)
 }
 
-// damped spring: tiles get pushed away from a left click and pulled toward a right click
-fn impulse(ripples: &[(Pos2, f32, bool)], center: Pos2) -> Vec2 {
-    let mut v = Vec2::ZERO;
-    for &(pos, age, right) in ripples {
-        let d = center - pos;
-        let dist = d.length().max(1.0);
-        let amp = 7.0 * (-dist / 240.0).exp() * (age * 15.0).sin() * (-age * 4.5).exp();
-        v += d / dist * amp * if right { -1.0 } else { 1.0 };
-    }
-    v
-}
-
-const LEFT_RINGS: [(f32, f32, f32); 1] = [(0.0, 150.0, 1.0)];
-const RIGHT_RINGS: [(f32, f32, f32); 2] = [(0.0, 120.0, 1.0), (0.14, 90.0, 0.7)];
-
-fn draw_ripples(ctx: &egui::Context, ripples: &[Ripple], time: f64) {
-    let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("ripples")));
-    for r in ripples {
-        let age = (time - r.t0) as f32;
-        let rings: &[(f32, f32, f32)] = if r.right { &RIGHT_RINGS } else { &LEFT_RINGS };
-        for &(delay, max_r, strength) in rings {
-            let t = (age - delay) / 0.75;
-            if !(0.0..1.0).contains(&t) {
-                continue;
-            }
-            let eased = 1.0 - (1.0 - t).powi(3);
-            let fade = (1.0 - t).powf(1.6) * strength;
-            let radius = 6.0 + max_r * eased;
-            painter.circle_filled(r.pos, radius, Color32::from_white_alpha((14.0 * fade) as u8));
-            painter.circle_stroke(
-                r.pos,
-                radius,
-                Stroke::new(1.0 + 2.0 * (1.0 - t), Color32::from_white_alpha((170.0 * fade) as u8)),
-            );
-        }
-    }
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.sync_prefs();
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.editing {
@@ -391,235 +451,292 @@ impl eframe::App for App {
             }
         }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                egui_glass::show_backdrop(ui, ui.max_rect());
-                let avail = ui.max_rect();
-                let grid = Grid::new(avail);
-                self.cols = grid.cols;
-                self.rows = grid.rows;
-                self.relocate();
+        let (reduce, pet_on, zoom, refraction) = {
+            let p = self.hub.borrow();
+            (p.reduce, p.pet, p.zoom, p.refraction)
+        };
+        let mut base_style = self.style;
+        base_style.zoom = zoom;
+        base_style.refraction = refraction;
+        glass::publish(&ctx, base_style);
 
-                let resizing = (avail.size() - self.last_size).length() > 0.5;
-                self.last_size = avail.size();
-                let full = avail.shrink(MARGIN);
-                let time = ctx.input(|i| i.time);
-                let ctrl = ctx.input(|i| i.modifiers.ctrl);
-                let pointer = ctx.pointer_hover_pos();
-                if self.editing {
-                    ctx.request_repaint();
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            let avail = ui.max_rect();
+            let grid = Grid::new(avail);
+            self.cols = grid.cols;
+            self.rows = grid.rows;
+            self.relocate();
+
+            let full = avail.shrink(MARGIN);
+            let (time, dt, focused) = ctx.input(|i| (i.time, i.stable_dt.min(0.05), i.viewport().focused.unwrap_or(true)));
+            let ctrl = ctx.input(|i| i.modifiers.ctrl);
+            let pointer = ctx.pointer_hover_pos();
+            let fps = if !focused {
+                8
+            } else if reduce {
+                24
+            } else {
+                60
+            };
+
+            self.wallpaper.update(&ctx, time, fps);
+            self.warp.prune(time);
+            if self.warp.active() || self.editing {
+                ctx.request_repaint();
+            }
+
+            let mut moving = false;
+            let mut rects: Vec<(Rect, Rect)> = Vec::new();
+            for t in &self.tiles {
+                let base = grid.rect(t.cell);
+                let mut direct = false;
+                let target = if self.closing.contains(&t.id) {
+                    Rect::from_center_size(base.center(), vec2(6.0, 6.0))
+                } else if let Some((_, d)) = self.drag.filter(|(id, _)| *id == t.id) {
+                    direct = true;
+                    base.translate(d)
+                } else if let Some((_, d)) = self.resize.filter(|(id, _)| *id == t.id) {
+                    direct = true;
+                    Rect::from_min_size(base.min, (base.size() + d).max(vec2(CELL * 0.6, CELL * 0.6)))
+                } else if self.expanded && self.focus == Some(t.id) {
+                    full
+                } else {
+                    base
+                };
+                let m = self.motion.entry(t.id).or_insert_with(|| Motion::at(target));
+                moving |= m.step(target, dt, direct);
+                rects.push((base, m.rect()));
+            }
+            if moving {
+                ctx.request_repaint();
+            }
+
+            if !self.expanded {
+                if let Some(fid) = self.focus {
+                    let settled = self.tiles.iter().zip(&rects).find(|(t, _)| t.id == fid).is_none_or(|(t, (b, r))| {
+                        let m = self.motion[&t.id];
+                        (r.min - b.min).length() < 1.0 && (r.max - b.max).length() < 1.0 && m.v.iter().all(|v| v.abs() < 2.0)
+                    });
+                    if settled {
+                        self.focus = None;
+                    }
                 }
+            }
 
-                self.ripples.retain(|r| time - r.t0 < 1.0);
-                if !self.ripples.is_empty() {
-                    ctx.request_repaint();
-                }
-                let waves: Vec<(Pos2, f32, bool)> = self
-                    .ripples
-                    .iter()
-                    .map(|r| (r.pos, (time - r.t0) as f32, r.right))
-                    .collect();
-
-                let mut rects: Vec<(Rect, Rect)> = Vec::new();
-                for t in &self.tiles {
-                    let base = grid.rect(t.cell);
-                    let calm = if resizing { 0.0 } else { 0.3 };
-                    let (target, secs) = if let Some((_, d)) = self.drag.filter(|(id, _)| *id == t.id) {
-                        (base.translate(d), 0.0)
-                    } else if let Some((_, d)) = self.resize.filter(|(id, _)| *id == t.id) {
-                        let size = (base.size() + d).max(vec2(CELL * 0.6, CELL * 0.6));
-                        (Rect::from_min_size(base.min, size), 0.0)
-                    } else if self.expanded && self.focus == Some(t.id) {
-                        (full, calm)
-                    } else {
-                        (base, calm)
+            let amount = wheel_amount(&ctx);
+            if amount != 0.0 && !self.editing {
+                if let Some(p) = pointer {
+                    let hit = match self.focus.filter(|_| self.expanded) {
+                        Some(fid) => self.tiles.iter().position(|t| t.id == fid),
+                        None => rects.iter().position(|(_, r)| r.contains(p)),
                     };
-                    rects.push((base, animate_rect(&ctx, t.id, target, secs)));
+                    if let Some(i) = hit {
+                        self.tiles[i].scroll(amount, time);
+                    }
+                }
+            }
+
+            let mut slots: Vec<Slot> = Vec::new();
+            for (tile, &(_, shown)) in self.tiles.iter().zip(&rects) {
+                let mut rect = shown;
+                let dragged = self.drag.is_some_and(|(id, _)| id == tile.id);
+                let resized = self.resize.is_some_and(|(id, _)| id == tile.id);
+                let focused = self.focus == Some(tile.id);
+
+                let mut glass = rect;
+                let mut prox = 0.0;
+                if self.editing && !dragged && !resized {
+                    let phase = tile.id as f32 * 1.7;
+                    let t = time as f32;
+                    let off = vec2((t * 19.0 + phase).sin() * 1.3, (t * 23.0 + phase * 1.9).cos() * 1.1);
+                    rect = rect.translate(off);
+                    glass = rect.expand(0.5 * (t * 17.0 + phase).sin());
+                } else if dragged || resized {
+                    glass = rect.expand(6.0);
+                } else if !focused && !reduce {
+                    let target = pointer.map_or(0.0, |p| (1.0 - distance_to(rect, p) / 170.0).clamp(0.0, 1.0));
+                    prox = ctx.animate_value_with_time(Id::unique(("prox", tile.id)), target, 0.18);
+                    let half = rect.size() / 2.0;
+                    let tilt = pointer.map_or(Vec2::ZERO, |p| {
+                        let rel = (p - rect.center()) / half;
+                        vec2(rel.x.clamp(-1.0, 1.0), rel.y.clamp(-1.0, 1.0))
+                    });
+                    glass = rect.expand(5.0 * prox).translate(tilt * 2.5 * prox);
+                    rect = rect.translate(tilt * 4.0 * prox);
                 }
 
-                if !self.expanded {
-                    if let Some(fid) = self.focus {
-                        let settled = self.tiles.iter().zip(&rects).find(|(t, _)| t.id == fid).is_none_or(
-                            |(_, (b, r))| (r.min - b.min).length() < 1.0 && (r.max - b.max).length() < 1.0,
-                        );
-                        if settled {
-                            self.focus = None;
+                let mut s = base_style;
+                if !self.editing && !reduce {
+                    let push = self.warp.field(rect.center(), time);
+                    rect = rect.translate(push);
+                    glass = glass.translate(push);
+                    let shimmer = (push.length() / 18.0).min(1.0);
+                    s.refraction += 26.0 * shimmer;
+                    s.chromatic = (s.chromatic + 0.4 * shimmer).min(1.0);
+                }
+                s.brightness *= 1.0 + 0.05 * prox;
+                s.specular = (s.specular + 0.1 * prox).min(1.0);
+
+                slots.push(Slot { id: tile.id, rect, glass, style: s, focused, dragged, resized });
+            }
+
+            let ghosting = self.focus.is_some();
+            let quality = if reduce { LiveBackdropQuality::Performance } else { LiveBackdropQuality::Full };
+            {
+                let (wallpaper, warp, tiles, live) = (&self.wallpaper, &self.warp, &mut self.tiles, &self.live);
+                let radius = base_style.corner_radius;
+                live.run_with_quality(ui, Color32::BLACK, quality, |ui| {
+                    wallpaper.paint(ui, avail, warp, time);
+                    if ghosting {
+                        for (tile, slot) in tiles.iter_mut().zip(&slots) {
+                            if !slot.focused {
+                                tile.ghost(ui, slot.glass, radius);
+                            }
                         }
-                    }
-                }
-
-                if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
-                    let at = ctx.input(|i| i.pointer.latest_pos());
-                    let mut taken = false;
-                    if let Some(i) = at.and_then(|p| rects.iter().position(|(_, r)| r.contains(p))) {
-                        taken = self.tiles[i].on_drop(&ctx, &path);
-                    }
-                    if !taken {
-                        self.set_wallpaper(&ctx, &path.to_string_lossy());
-                    }
-                }
-
-                let amount = wheel_amount(&ctx);
-                if amount != 0.0 && !self.editing {
-                    if let Some(p) = pointer {
-                        let hit = match self.focus.filter(|_| self.expanded) {
-                            Some(fid) => self.tiles.iter().position(|t| t.id == fid),
-                            None => rects.iter().position(|(_, r)| r.contains(p)),
-                        };
-                        if let Some(i) = hit {
-                            self.tiles[i].scroll(amount, time);
-                        }
-                    }
-                }
-
-                let style = self.style;
-                let mut outs: Vec<(u64, Out)> = Vec::new();
-                for (i, tile) in self.tiles.iter_mut().enumerate() {
-                    let (_, mut rect) = rects[i];
-                    let dragged = self.drag.is_some_and(|(id, _)| id == tile.id);
-                    let resized = self.resize.is_some_and(|(id, _)| id == tile.id);
-                    let focused = self.focus == Some(tile.id);
-                    let is_open = self.expanded && focused;
-
-                    let mut glass = rect;
-                    let mut prox = 0.0;
-                    if self.editing && !dragged && !resized {
-                        let phase = tile.id as f32 * 1.7;
-                        let t = time as f32;
-                        let off = vec2((t * 19.0 + phase).sin() * 1.3, (t * 23.0 + phase * 1.9).cos() * 1.1);
-                        rect = rect.translate(off);
-                        glass = rect.expand(0.5 * (t * 17.0 + phase).sin());
-                    } else if dragged || resized {
-                        glass = rect.expand(6.0);
-                    } else if !focused {
-                        let target = pointer.map_or(0.0, |p| (1.0 - distance_to(rect, p) / 170.0).clamp(0.0, 1.0));
-                        prox = ctx.animate_value_with_time(Id::unique(("prox", tile.id)), target, 0.18);
-                        let half = rect.size() / 2.0;
-                        let tilt = pointer.map_or(Vec2::ZERO, |p| {
-                            let rel = (p - rect.center()) / half;
-                            vec2(rel.x.clamp(-1.0, 1.0), rel.y.clamp(-1.0, 1.0))
-                        });
-                        glass = rect.expand(5.0 * prox).translate(tilt * 2.5 * prox);
-                        rect = rect.translate(tilt * 4.0 * prox);
-                    }
-
-                    if !self.editing {
-                        let push = impulse(&waves, rect.center());
-                        rect = rect.translate(push);
-                        glass = glass.translate(push);
-                    }
-
-                    let mut s = style;
-                    s.brightness *= 1.0 + 0.05 * prox;
-                    s.specular = (s.specular + 0.1 * prox).min(1.0);
-
-                    let view = View {
-                        expanded: is_open,
-                        editing: self.editing,
-                        ctrl,
-                    };
-                    let order = if focused || dragged || resized { Order::Foreground } else { Order::Middle };
-
-                    let mut out = Out::default();
-                    egui::Area::new(Id::unique(("tile", tile.id)))
-                        .order(order)
-                        .fixed_pos(rect.min)
-                        .movable(false)
-                        .constrain(false)
-                        .show(&ctx, |ui| {
-                            let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
-                            out = tile.show(ui, r, glass, &s, &view);
-                        });
-                    outs.push((tile.id, out));
-                }
-
-                let press = ctx.input(|i| {
-                    let p = i.pointer.hover_pos()?;
-                    if i.pointer.button_pressed(PointerButton::Primary) {
-                        Some((p, false))
-                    } else if i.pointer.button_pressed(PointerButton::Secondary) {
-                        Some((p, true))
-                    } else {
-                        None
                     }
                 });
-                if let (Some((p, right)), false) = (press, self.editing) {
-                    let on_tile = outs.iter().any(|(_, o)| o.body_hovered);
-                    let on_backdrop = ctx.layer_id_at(p).is_none_or(|l| l.order == Order::Background);
-                    if on_tile || on_backdrop {
-                        self.ripples.push(Ripple { pos: p, t0: time, right });
-                    }
-                }
-                draw_ripples(&ctx, &self.ripples, time);
+            }
 
-                for (id, out) in outs {
-                    if out.expand {
-                        if self.expanded && self.focus == Some(id) {
-                            self.expanded = false;
-                        } else {
-                            self.focus = Some(id);
-                            self.expanded = true;
-                        }
-                    }
-                    if out.long_press && !self.editing {
-                        self.editing = true;
-                        self.expanded = false;
-                    }
-                    if out.remove {
-                        self.tiles.retain(|t| t.id != id);
-                        continue;
-                    }
-                    if let Some(d) = out.drag {
-                        let acc = self.drag.filter(|(i, _)| *i == id).map_or(Vec2::ZERO, |(_, a)| a);
-                        self.drag = Some((id, acc + d));
-                    }
-                    if out.drag_end {
-                        self.finish_drag(&grid, id);
-                    }
-                    if let Some(d) = out.resize {
-                        let acc = self.resize.filter(|(i, _)| *i == id).map_or(Vec2::ZERO, |(_, a)| a);
-                        self.resize = Some((id, acc + d));
-                    }
-                    if out.resize_end {
-                        self.finish_resize(&grid, id);
-                    }
+            let mut outs: Vec<(u64, Out)> = Vec::new();
+            for (tile, slot) in self.tiles.iter_mut().zip(&slots) {
+                if (ghosting && !slot.focused) || self.closing.contains(&slot.id) {
+                    outs.push((slot.id, Out::default()));
+                    continue;
                 }
+                let view = View {
+                    expanded: self.expanded && slot.focused,
+                    editing: self.editing,
+                    ctrl,
+                };
+                let order = if slot.focused || slot.dragged || slot.resized { Order::Foreground } else { Order::Middle };
 
-                if self.editing {
-                    let mut add = None;
-                    let mut done = false;
-                    egui::Area::new(Id::unique("edit_bar"))
-                        .order(Order::Foreground)
-                        .anchor(Align2::CENTER_TOP, vec2(0.0, 14.0))
-                        .show(&ctx, |ui| {
-                            Glass::new(style.with_corner_radius(f32::INFINITY))
-                                .inner_margin(egui::Margin::symmetric(14, 8))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let plus = ui.button("+  Add");
-                                        egui::Popup::menu(&plus).show(|ui| {
-                                            for k in Kind::ALL {
-                                                if ui.button(k.name()).clicked() {
-                                                    add = Some(k);
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-                                        if ui.button("Done").clicked() {
-                                            done = true;
-                                        }
-                                    });
-                                });
-                        });
-                    if let Some(k) = add {
-                        self.add_tile(k);
-                    }
-                    if done {
-                        self.end_edit();
-                    }
+                let mut out = Out::default();
+                egui::Area::new(Id::unique(("tile", slot.id)))
+                    .order(order)
+                    .fixed_pos(slot.rect.min)
+                    .movable(false)
+                    .constrain(false)
+                    .show(&ctx, |ui| {
+                        let (r, _) = ui.allocate_exact_size(slot.rect.size(), Sense::hover());
+                        out = tile.show(ui, r, slot.glass, &slot.style, &view);
+                    });
+                outs.push((slot.id, out));
+            }
+
+            let press = ctx.input(|i| {
+                let p = i.pointer.hover_pos()?;
+                if i.pointer.button_pressed(PointerButton::Primary) {
+                    Some((p, false))
+                } else if i.pointer.button_pressed(PointerButton::Secondary) {
+                    Some((p, true))
+                } else {
+                    None
                 }
             });
+            if let (Some((p, right)), false, false) = (press, self.editing, reduce) {
+                let on_tile = outs.iter().any(|(_, o)| o.body_hovered);
+                let on_backdrop = ctx.layer_id_at(p).is_none_or(|l| l.order == Order::Background);
+                if on_tile || on_backdrop {
+                    self.warp.push(p, time, right);
+                }
+            }
+            self.warp.draw_rings(&ctx, time);
+
+            for (id, out) in outs {
+                if out.expand {
+                    if self.expanded && self.focus == Some(id) {
+                        self.expanded = false;
+                    } else {
+                        self.focus = Some(id);
+                        self.expanded = true;
+                    }
+                }
+                if out.long_press && !self.editing {
+                    self.editing = true;
+                    self.expanded = false;
+                }
+                if out.remove {
+                    self.closing.insert(id);
+                    continue;
+                }
+                if let Some(d) = out.drag {
+                    let acc = self.drag.filter(|(i, _)| *i == id).map_or(Vec2::ZERO, |(_, a)| a);
+                    self.drag = Some((id, acc + d));
+                }
+                if out.drag_end {
+                    self.finish_drag(&grid, id);
+                }
+                if let Some(d) = out.resize {
+                    let acc = self.resize.filter(|(i, _)| *i == id).map_or(Vec2::ZERO, |(_, a)| a);
+                    self.resize = Some((id, acc + d));
+                }
+                if out.resize_end {
+                    self.finish_resize(&grid, id);
+                }
+            }
+
+            let gone: Vec<u64> = self
+                .closing
+                .iter()
+                .copied()
+                .filter(|id| self.motion.get(id).is_none_or(|m| m.rect().width() < 14.0))
+                .collect();
+            for id in gone {
+                self.closing.remove(&id);
+                self.motion.remove(&id);
+                self.tiles.retain(|t| t.id != id);
+                if self.focus == Some(id) {
+                    self.focus = None;
+                    self.expanded = false;
+                }
+            }
+
+            if pet_on {
+                let plats = self.platforms(&slots, avail);
+                let active = ctx.input(|i| i.pointer.is_moving() || i.pointer.any_down() || !i.events.is_empty());
+                self.pet.update(dt, &plats, avail, active);
+                let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("pet")));
+                self.pet.paint(&painter);
+                if self.pet.animating() {
+                    ctx.request_repaint_after(Duration::from_millis(if reduce { 33 } else { 16 }));
+                }
+            }
+
+            if self.editing {
+                let mut add = None;
+                let mut done = false;
+                let bar_style = glass::popup_style(base_style).with_corner_radius(f32::INFINITY);
+                egui::Area::new(Id::unique("edit_bar"))
+                    .order(Order::Foreground)
+                    .anchor(Align2::CENTER_TOP, vec2(0.0, 14.0))
+                    .show(&ctx, |ui| {
+                        Glass::new(bar_style)
+                            .inner_margin(egui::Margin::symmetric(14, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let plus = ui.button("+  Add");
+                                    glass::menu(&plus, |ui| {
+                                        for k in Kind::ALL {
+                                            if ui.button(k.name()).clicked() {
+                                                add = Some(k);
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                    if ui.button("Done").clicked() {
+                                        done = true;
+                                    }
+                                });
+                            });
+                    });
+                if let Some(k) = add {
+                    self.add_tile(k, &grid);
+                }
+                if done {
+                    self.end_edit();
+                }
+            }
+        });
     }
 }
 
@@ -628,13 +745,10 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
+            .with_title("Tilezone")
             .with_inner_size([900.0, 620.0])
             .with_min_inner_size([800.0, 560.0]),
         ..Default::default()
     };
-    eframe::run_native(
-        "glass spike",
-        options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
-    )
+    eframe::run_native("Tilezone", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

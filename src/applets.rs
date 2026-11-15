@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,6 +10,14 @@ use eframe::egui::{
     Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
 use sysinfo::{Disks, Gpus, System};
+
+use crate::glass;
+use crate::paint::Paint;
+use crate::settings::{Hub, Settings};
+use crate::shooter::Shooter;
+use crate::viewer::Viewer;
+
+pub const ACCENT: Color32 = Color32::from_rgb(192, 96, 255);
 
 pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("InterBold".into()))
@@ -19,10 +28,53 @@ pub trait Applet {
     fn titled(&self) -> bool {
         true
     }
-    fn on_drop(&mut self, _ctx: &egui::Context, _path: &Path) -> bool {
-        false
+    fn ghost(&mut self, ui: &mut Ui) {
+        self.ui(ui);
     }
     fn ui(&mut self, ui: &mut Ui);
+}
+
+pub fn ghost_fill(ui: &mut Ui) {
+    ui.painter().rect_filled(ui.max_rect(), 18.0, dim(26));
+}
+
+#[derive(Default)]
+pub struct Picker {
+    rx: Option<Receiver<Option<PathBuf>>>,
+}
+
+impl Picker {
+    pub fn open(&mut self, ctx: &egui::Context, title: &'static str, exts: &'static [&'static str]) {
+        if self.rx.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new().set_title(title).add_filter("Supported files", exts).pick_file();
+            let _ = tx.send(path);
+            ctx.request_repaint();
+        });
+        self.rx = Some(rx);
+    }
+
+    pub fn poll(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
+        let rx = self.rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(path) => {
+                self.rx = None;
+                path
+            }
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(250));
+                None
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.rx = None;
+                None
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -34,10 +86,14 @@ pub enum Kind {
     Photo,
     ClickSpeed,
     Snake,
+    Shooter,
+    Paint,
+    Viewer,
+    Settings,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 11] = [
         Kind::System,
         Kind::Todo,
         Kind::Notepad,
@@ -45,6 +101,10 @@ impl Kind {
         Kind::Photo,
         Kind::ClickSpeed,
         Kind::Snake,
+        Kind::Shooter,
+        Kind::Paint,
+        Kind::Viewer,
+        Kind::Settings,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,17 +116,21 @@ impl Kind {
             Kind::Photo => "Photo",
             Kind::ClickSpeed => "Click speed",
             Kind::Snake => "Snake",
+            Kind::Shooter => "Space shooter",
+            Kind::Paint => "Paint",
+            Kind::Viewer => "Viewer",
+            Kind::Settings => "Settings",
         }
     }
 
     pub fn span(self) -> (usize, usize) {
         match self {
-            Kind::System => (4, 1),
+            Kind::System | Kind::Settings => (4, 1),
             _ => (2, 2),
         }
     }
 
-    pub fn build(self) -> Box<dyn Applet> {
+    pub fn build(self, hub: &Hub) -> Box<dyn Applet> {
         match self {
             Kind::System => Box::new(SystemStats::new()),
             Kind::Todo => Box::new(Todo::new()),
@@ -75,11 +139,15 @@ impl Kind {
             Kind::Photo => Box::new(Photo::new()),
             Kind::ClickSpeed => Box::new(ClickSpeed::new()),
             Kind::Snake => Box::new(Snake::new()),
+            Kind::Shooter => Box::new(Shooter::new()),
+            Kind::Paint => Box::new(Paint::new()),
+            Kind::Viewer => Box::new(Viewer::new()),
+            Kind::Settings => Box::new(Settings::new(hub.clone())),
         }
     }
 }
 
-fn dim(alpha: u8) -> Color32 {
+pub fn dim(alpha: u8) -> Color32 {
     Color32::from_white_alpha(alpha)
 }
 
@@ -459,11 +527,29 @@ impl Applet for Clipboard {
 pub struct Photo {
     tex: Option<egui::TextureHandle>,
     err: Option<String>,
+    picker: Picker,
 }
 
 impl Photo {
     pub fn new() -> Self {
-        Self { tex: None, err: None }
+        Self { tex: None, err: None, picker: Picker::default() }
+    }
+
+    fn load(&mut self, ctx: &egui::Context, path: &Path) {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.thumbnail(2048, 2048).to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                self.tex = Some(ctx.load_texture("pinned_photo", color, egui::TextureOptions::LINEAR));
+                self.err = None;
+            }
+            Err(e) => self.err = Some(e.to_string()),
+        }
+    }
+
+    fn choose(&mut self, ctx: &egui::Context) {
+        self.picker.open(ctx, "Choose a photo", &["png", "jpg", "jpeg", "webp"]);
     }
 }
 
@@ -476,32 +562,24 @@ impl Applet for Photo {
         false
     }
 
-    fn on_drop(&mut self, ctx: &egui::Context, path: &Path) -> bool {
-        match image::open(path) {
-            Ok(img) => {
-                let rgba = img.thumbnail(2048, 2048).to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                self.tex = Some(ctx.load_texture("pinned_photo", color, egui::TextureOptions::LINEAR));
-                self.err = None;
-            }
-            Err(e) => self.err = Some(e.to_string()),
-        }
-        true
+    fn ghost(&mut self, ui: &mut Ui) {
+        ghost_fill(ui);
     }
 
     fn ui(&mut self, ui: &mut Ui) {
+        if let Some(path) = self.picker.poll(ui.ctx()) {
+            self.load(ui.ctx(), &path);
+        }
         let rect = ui.max_rect();
+        let resp = ui.interact(rect, ui.scope_id().with("photo"), Sense::click());
+
         let Some(tex) = &self.tex else {
-            ui.painter().rect_filled(rect, 24.0, dim(16));
-            let msg = self.err.as_deref().unwrap_or("Drop a photo here");
-            ui.painter().text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                msg,
-                FontId::proportional(13.0),
-                dim(170),
-            );
+            ui.painter().rect_filled(rect, 24.0, dim(if resp.hovered() { 26 } else { 16 }));
+            let msg = self.err.as_deref().unwrap_or("Choose a photo");
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), dim(170));
+            if resp.clicked() {
+                self.choose(ui.ctx());
+            }
             return;
         };
 
@@ -514,13 +592,18 @@ impl Applet for Photo {
             let h = ta / ra;
             Rect::from_min_max(pos2(0.0, (1.0 - h) / 2.0), pos2(1.0, (1.0 + h) / 2.0))
         };
-        ui.put(
-            rect,
-            egui::Image::new((tex.id(), ts))
-                .uv(uv)
-                .corner_radius(24.0)
-                .fit_to_exact_size(rect.size()),
-        );
+        egui::Image::new((tex.id(), ts)).uv(uv).corner_radius(24.0).paint_at(ui, rect);
+
+        let mut change = false;
+        glass::context_menu(&resp, |ui| {
+            if ui.button("Change photo").clicked() {
+                change = true;
+                ui.close();
+            }
+        });
+        if change {
+            self.choose(ui.ctx());
+        }
     }
 }
 
@@ -602,7 +685,7 @@ impl Applet for ClickSpeed {
             dim(160),
         );
 
-        resp.context_menu(|ui| {
+        glass::context_menu(&resp, |ui| {
             if ui.button("Reset").clicked() {
                 self.total = 0;
                 self.best = 0;
