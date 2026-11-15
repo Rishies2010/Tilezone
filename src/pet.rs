@@ -1,4 +1,4 @@
-use eframe::egui::{pos2, vec2, Color32, Context, Painter, Pos2, Rect, Shape, TextureHandle, TextureOptions};
+use eframe::egui::{pos2, vec2, Color32, Context, Painter, Pos2, Rect, Shape, TextureHandle, TextureOptions, Vec2};
 
 use crate::sprites;
 
@@ -26,6 +26,7 @@ pub struct Platform {
 pub struct Input {
     pub cursor: Option<Pos2>,
     pub click: Option<Pos2>,
+    pub down: bool,
     pub active: bool,
     pub follow: bool,
     pub interval: f32,
@@ -88,6 +89,7 @@ enum State {
     Touch { anchor: Pos2, left: f32 },
     Scared { left: f32 },
     Leap { left: f32 },
+    Held { grab: Vec2, origin: Pos2, moved: bool },
 }
 
 pub struct Pet {
@@ -101,6 +103,7 @@ pub struct Pet {
     next_chase: f32,
     chase: Option<f32>,
     flee: bool,
+    vel: Vec2,
     rng: u64,
 }
 
@@ -121,6 +124,7 @@ impl Pet {
             next_chase: 15.0,
             chase: None,
             flee: false,
+            vel: Vec2::ZERO,
             rng: 0x9E37_79B9_7F4A_7C15,
         }
     }
@@ -132,6 +136,10 @@ impl Pet {
             _ => 16,
         };
         std::time::Duration::from_millis(ms)
+    }
+
+    pub fn held(&self) -> bool {
+        matches!(self.state, State::Held { .. })
     }
 
     pub fn hit(&self, c: Pos2, scale: f32) -> bool {
@@ -247,13 +255,11 @@ impl Pet {
         }
 
         if let Some(c) = inp.click {
-            let grounded = matches!(
-                self.state,
-                State::Sit { .. } | State::Walk | State::Run | State::Sleep | State::Touch { .. }
-            );
-            if grounded && self.hit(c, inp.scale) {
+            if !matches!(self.state, State::Held { .. }) && self.hit(c, inp.scale) {
                 self.end_chase(inp.interval);
-                self.set(State::Leap { left: LEAP_TIME });
+                self.flee = false;
+                self.vel = Vec2::ZERO;
+                self.set(State::Held { grab: self.pos - c, origin: c, moved: false });
             }
         }
 
@@ -278,6 +284,37 @@ impl Pet {
         }
 
         match self.state {
+            State::Held { grab, origin, moved } => {
+                if !inp.down {
+                    if moved {
+                        self.on = None;
+                        let (vx, vy) = (self.vel.x.clamp(-600.0, 600.0), self.vel.y.clamp(-900.0, 600.0));
+                        self.set(State::Fall { vy, vx });
+                    } else if self.on.is_some() {
+                        self.set(State::Leap { left: LEAP_TIME });
+                    } else {
+                        self.set(State::Fall { vy: 0.0, vx: 0.0 });
+                    }
+                    return;
+                }
+                if let Some(c) = inp.cursor {
+                    let moved = moved || c.distance(origin) > 6.0;
+                    if moved {
+                        let target = pos2(
+                            (c.x + grab.x).clamp(bounds.min.x + 16.0, bounds.max.x - 16.0),
+                            (c.y + grab.y).clamp(bounds.min.y + 40.0, bounds.max.y + 20.0),
+                        );
+                        let v = (target - self.pos) / dt.max(0.001);
+                        self.vel = self.vel * 0.6 + v * 0.4;
+                        if (target.x - self.pos.x).abs() > 1.0 {
+                            self.dir = (target.x - self.pos.x).signum();
+                        }
+                        self.pos = target;
+                        self.on = None;
+                    }
+                    self.state = State::Held { grab, origin, moved };
+                }
+            }
             State::Hop { from, to, dur, lift, target } => {
                 let mut to = to;
                 match target {
@@ -471,6 +508,15 @@ impl Pet {
             State::Scared { .. } => {
                 let (r, f) = cyc(SCARED, 12.0);
                 (r, f, 0.0, false)
+            }
+            State::Held { moved, .. } => {
+                if moved {
+                    let (r, f) = cyc(SCARED, 12.0);
+                    (r, f, 0.0, false)
+                } else {
+                    let (r, f) = cyc(IDLE[0], 5.0);
+                    (r, f, 0.0, true)
+                }
             }
             State::Leap { left } => {
                 let prog = 1.0 - left / LEAP_TIME;

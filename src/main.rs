@@ -714,7 +714,7 @@ impl eframe::App for App {
             if !ctx.input(|i| i.pointer.primary_down()) {
                 self.hold = None;
             } else if let Some((p, false)) = press {
-                self.hold = blank(p).then_some((p, time));
+                self.hold = (blank(p) && !on_pet).then_some((p, time));
             }
             if let Some((origin, since)) = self.hold {
                 if self.editing || pointer.is_none_or(|q| q.distance(origin) > 10.0) {
@@ -738,7 +738,7 @@ impl eframe::App for App {
                         self.expanded = true;
                     }
                 }
-                if out.long_press && !self.editing {
+                if out.long_press && !self.editing && !self.pet.held() {
                     self.editing = true;
                     self.expanded = false;
                 }
@@ -784,6 +784,7 @@ impl eframe::App for App {
                 let input = PetInput {
                     cursor: pointer,
                     click: pet_click,
+                    down: ctx.input(|i| i.pointer.primary_down()),
                     active,
                     follow: prefs.pet_follow && !self.editing,
                     interval: prefs.pet_interval,
