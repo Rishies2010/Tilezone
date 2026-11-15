@@ -95,7 +95,7 @@ impl Wallpaper {
             rs: rs.clone(),
             gpu: None,
             source: Source::Aurora,
-            label: "Aurora".into(),
+            label: "Default".into(),
             error: None,
         };
         w.ensure(AURORA);
@@ -113,7 +113,7 @@ impl Wallpaper {
     pub fn use_aurora(&mut self) {
         self.ensure(AURORA);
         self.source = Source::Aurora;
-        self.label = "Aurora".into();
+        self.label = "Default".into();
     }
 
     pub fn load(&mut self, path: &Path) -> Result<(), String> {

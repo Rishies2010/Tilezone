@@ -9,12 +9,15 @@ use eframe::egui::{
     self, pos2, text::LayoutJob, vec2, Align, Align2, Color32, FontFamily, FontId, Galley, Key, Layout, Painter, Pos2,
     Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sysinfo::{Disks, Gpus, System};
 
 use crate::glass;
 use crate::paint::Paint;
 use crate::settings::{Hub, Settings};
 use crate::shooter::Shooter;
+use crate::sprites;
 use crate::viewer::Viewer;
 
 pub const ACCENT: Color32 = Color32::from_rgb(192, 96, 255);
@@ -25,13 +28,37 @@ pub fn bold(size: f32) -> FontId {
 
 pub trait Applet {
     fn name(&self) -> &'static str;
+    fn kind(&self) -> Kind;
     fn titled(&self) -> bool {
         true
     }
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        None
+    }
+    fn restore(&mut self, _ctx: &egui::Context, _dir: &Path, _data: &Value) {}
     fn ghost(&mut self, ui: &mut Ui) {
         self.ui(ui);
     }
     fn ui(&mut self, ui: &mut Ui);
+}
+
+pub fn overlay(p: &Painter, rect: Rect, title: &str, sub: &str) {
+    p.rect_filled(rect, 16.0, Color32::from_black_alpha(100));
+    let max_w = (rect.width() - 20.0).max(20.0);
+    let fit = |text: &str, mut size: f32, font: fn(f32) -> FontId, color: Color32| loop {
+        let g = p.layout_no_wrap(text.to_string(), font(size), color);
+        if g.size().x <= max_w || size <= 7.5 {
+            return g;
+        }
+        size -= 0.5;
+    };
+    let a = fit(title, 15.0, bold, Color32::WHITE);
+    let b = fit(sub, 12.0, FontId::proportional, dim(190));
+    let top = rect.center().y - (a.size().y + 4.0 + b.size().y) / 2.0;
+    let (ax, bx) = (rect.center().x - a.size().x / 2.0, rect.center().x - b.size().x / 2.0);
+    let ah = a.size().y;
+    p.galley(pos2(ax, top), a, Color32::WHITE);
+    p.galley(pos2(bx, top + ah + 4.0), b, dim(190));
 }
 
 pub fn ghost_fill(ui: &mut Ui) {
@@ -77,7 +104,7 @@ impl Picker {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Kind {
     System,
     Todo,
@@ -132,14 +159,14 @@ impl Kind {
 
     pub fn build(self, hub: &Hub) -> Box<dyn Applet> {
         match self {
-            Kind::System => Box::new(SystemStats::new()),
+            Kind::System => Box::new(SystemStats::new(hub.clone())),
             Kind::Todo => Box::new(Todo::new()),
             Kind::Notepad => Box::new(Notepad::new()),
-            Kind::Clipboard => Box::new(Clipboard::new()),
+            Kind::Clipboard => Box::new(Clipboard::new(hub.clone())),
             Kind::Photo => Box::new(Photo::new()),
             Kind::ClickSpeed => Box::new(ClickSpeed::new()),
-            Kind::Snake => Box::new(Snake::new()),
-            Kind::Shooter => Box::new(Shooter::new()),
+            Kind::Snake => Box::new(Snake::new(hub.clone())),
+            Kind::Shooter => Box::new(Shooter::new(hub.clone())),
             Kind::Paint => Box::new(Paint::new()),
             Kind::Viewer => Box::new(Viewer::new()),
             Kind::Settings => Box::new(Settings::new(hub.clone())),
@@ -222,10 +249,11 @@ pub struct SystemStats {
     disks: Disks,
     gpus: Option<Gpus>,
     last: Instant,
+    hub: Hub,
 }
 
 impl SystemStats {
-    pub fn new() -> Self {
+    pub fn new(hub: Hub) -> Self {
         let mut sys = System::new().expect("system info unavailable");
         sys.refresh_cpu_usage();
         sys.refresh_memory();
@@ -234,6 +262,7 @@ impl SystemStats {
             disks: Disks::new_with_refreshed_list().expect("disk info unavailable"),
             gpus: Gpus::new_with_refreshed_list().ok(),
             last: Instant::now(),
+            hub,
         }
     }
 }
@@ -243,12 +272,17 @@ impl Applet for SystemStats {
         "System"
     }
 
+    fn kind(&self) -> Kind {
+        Kind::System
+    }
+
     fn titled(&self) -> bool {
         false
     }
 
     fn ui(&mut self, ui: &mut Ui) {
-        if self.last.elapsed() >= Duration::from_secs(1) {
+        let every = Duration::from_secs_f32(self.hub.borrow().sys_interval.clamp(0.5, 10.0));
+        if self.last.elapsed() >= every {
             self.sys.refresh_cpu_usage();
             self.sys.refresh_memory();
             self.disks.refresh(true);
@@ -257,7 +291,7 @@ impl Applet for SystemStats {
             }
             self.last = Instant::now();
         }
-        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        ui.ctx().request_repaint_after(every);
 
         let cpu = self.sys.global_cpu_usage() / 100.0;
         let (used, total) = (self.sys.used_memory(), self.sys.total_memory());
@@ -340,6 +374,20 @@ impl Applet for Todo {
         "Reminders"
     }
 
+    fn kind(&self) -> Kind {
+        Kind::Todo
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        Some(json!({ "items": self.items }))
+    }
+
+    fn restore(&mut self, _ctx: &egui::Context, _dir: &Path, data: &Value) {
+        if let Some(items) = data.get("items").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+            self.items = items;
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui) {
         let left = self.items.iter().filter(|(d, _)| !*d).count();
         ui.horizontal(|ui| {
@@ -399,6 +447,20 @@ impl Applet for Notepad {
         "Notes"
     }
 
+    fn kind(&self) -> Kind {
+        Kind::Notepad
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        Some(json!({ "text": self.text }))
+    }
+
+    fn restore(&mut self, _ctx: &egui::Context, _dir: &Path, data: &Value) {
+        if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+            self.text = text.to_string();
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui) {
         let row = ui.text_style_height(&egui::TextStyle::Body);
         let rows = ((ui.available_height() / row) as usize).saturating_sub(1).max(2);
@@ -429,14 +491,16 @@ pub struct Clipboard {
     handle: Option<arboard::Clipboard>,
     items: Vec<String>,
     last: Instant,
+    hub: Hub,
 }
 
 impl Clipboard {
-    pub fn new() -> Self {
+    pub fn new(hub: Hub) -> Self {
         Self {
             handle: arboard::Clipboard::new().ok(),
             items: Vec::new(),
             last: Instant::now() - Duration::from_secs(1),
+            hub,
         }
     }
 
@@ -451,7 +515,8 @@ impl Clipboard {
             if !text.is_empty() && self.items.first() != Some(&text) {
                 self.items.retain(|t| *t != text);
                 self.items.insert(0, text);
-                self.items.truncate(30);
+                let keep = self.hub.borrow().clip_len.max(1);
+                self.items.truncate(keep);
             }
         }
     }
@@ -460,6 +525,10 @@ impl Clipboard {
 impl Applet for Clipboard {
     fn name(&self) -> &'static str {
         "Clipboard"
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Clipboard
     }
 
     fn ui(&mut self, ui: &mut Ui) {
@@ -471,15 +540,7 @@ impl Applet for Clipboard {
             return;
         }
 
-        let mut clear = false;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} recent", self.items.len())).weak());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if !self.items.is_empty() && ui.small_button("Clear").clicked() {
-                    clear = true;
-                }
-            });
-        });
+        ui.label(RichText::new(format!("{} recent", self.items.len())).weak());
 
         if self.items.is_empty() {
             ui.add_space(8.0);
@@ -518,9 +579,6 @@ impl Applet for Clipboard {
         if let Some(i) = copy {
             ui.ctx().copy_text(self.items[i].clone());
         }
-        if clear {
-            self.items.clear();
-        }
     }
 }
 
@@ -528,11 +586,12 @@ pub struct Photo {
     tex: Option<egui::TextureHandle>,
     err: Option<String>,
     picker: Picker,
+    path: Option<PathBuf>,
 }
 
 impl Photo {
     pub fn new() -> Self {
-        Self { tex: None, err: None, picker: Picker::default() }
+        Self { tex: None, err: None, picker: Picker::default(), path: None }
     }
 
     fn load(&mut self, ctx: &egui::Context, path: &Path) {
@@ -543,6 +602,7 @@ impl Photo {
                 let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                 self.tex = Some(ctx.load_texture("pinned_photo", color, egui::TextureOptions::LINEAR));
                 self.err = None;
+                self.path = Some(path.to_path_buf());
             }
             Err(e) => self.err = Some(e.to_string()),
         }
@@ -556,6 +616,21 @@ impl Photo {
 impl Applet for Photo {
     fn name(&self) -> &'static str {
         "Photo"
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Photo
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        self.path.as_ref().map(|p| json!({ "path": p.to_string_lossy() }))
+    }
+
+    fn restore(&mut self, ctx: &egui::Context, _dir: &Path, data: &Value) {
+        if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+            self.load(ctx, Path::new(path));
+            self.err = None;
+        }
     }
 
     fn titled(&self) -> bool {
@@ -626,6 +701,19 @@ impl ClickSpeed {
 impl Applet for ClickSpeed {
     fn name(&self) -> &'static str {
         "Click speed"
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::ClickSpeed
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        Some(json!({ "best": self.best, "total": self.total }))
+    }
+
+    fn restore(&mut self, _ctx: &egui::Context, _dir: &Path, data: &Value) {
+        self.best = data.get("best").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        self.total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     }
 
     fn ui(&mut self, ui: &mut Ui) {
@@ -718,10 +806,12 @@ pub struct Snake {
     best: u32,
     last: f64,
     rng: u64,
+    hub: Hub,
+    apple: Option<egui::TextureHandle>,
 }
 
 impl Snake {
-    pub fn new() -> Self {
+    pub fn new(hub: Hub) -> Self {
         let seed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(7, |d| d.as_nanos() as u64) | 1;
         let mut s = Self {
             body: VecDeque::new(),
@@ -733,6 +823,8 @@ impl Snake {
             best: 0,
             last: 0.0,
             rng: seed,
+            hub,
+            apple: None,
         };
         s.reset();
         s.phase = Phase::Idle;
@@ -795,6 +887,18 @@ impl Applet for Snake {
         "Snake"
     }
 
+    fn kind(&self) -> Kind {
+        Kind::Snake
+    }
+
+    fn save(&mut self, _dir: &Path) -> Option<Value> {
+        Some(json!({ "best": self.best }))
+    }
+
+    fn restore(&mut self, _ctx: &egui::Context, _dir: &Path, data: &Value) {
+        self.best = data.get("best").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    }
+
     fn ui(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
         let side = rect.width().min(rect.height() - 18.0).max(40.0);
@@ -827,7 +931,8 @@ impl Applet for Snake {
 
         if self.phase == Phase::Running {
             let now = ui.input(|i| i.time);
-            let interval = (0.14 - self.score as f64 * 0.003).max(0.07);
+            let speed = self.hub.borrow().snake_speed.clamp(0.5, 3.0) as f64;
+            let interval = (0.14 - self.score as f64 * 0.003).max(0.07) / speed;
             if now - self.last >= interval {
                 self.last = now;
                 self.step();
@@ -843,20 +948,29 @@ impl Applet for Snake {
         for (i, &(x, y)) in self.body.iter().enumerate() {
             let min = board.min + vec2(x as f32, y as f32) * cell;
             let r = Rect::from_min_size(min, vec2(cell, cell)).shrink(cell * 0.06);
-            let alpha = 240.0 - 120.0 * i as f32 / len;
-            p.rect_filled(r, cell * 0.38, dim(alpha as u8));
+            let k = i as f32 / len;
+            let color = Color32::from_rgb((110.0 - 60.0 * k) as u8, (235.0 - 90.0 * k) as u8, (120.0 - 40.0 * k) as u8);
+            p.rect_filled(r, cell * 0.38, color);
+            if i == 0 {
+                let d = vec2(self.dir.0 as f32, self.dir.1 as f32);
+                let side = vec2(-d.y, d.x);
+                for s in [-1.0, 1.0] {
+                    let eye = r.center() + d * cell * 0.14 + side * s * cell * 0.17;
+                    p.circle_filled(eye, cell * 0.08, Color32::from_black_alpha(220));
+                }
+            }
         }
+        let apple = self
+            .apple
+            .get_or_insert_with(|| sprites::load(ui.ctx(), "apple", sprites::APPLE, egui::TextureOptions::LINEAR));
         let fc = board.min + vec2(self.food.0 as f32 + 0.5, self.food.1 as f32 + 0.5) * cell;
-        p.circle_filled(fc, cell * 0.36, dim(235));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        p.image(apple.id(), Rect::from_center_size(fc, vec2(cell * 1.25, cell * 1.25)), uv, Color32::WHITE);
 
-        let msg = match self.phase {
-            Phase::Idle => Some("Click to play"),
-            Phase::Dead => Some("Game over · click to retry"),
-            Phase::Running => None,
-        };
-        if let Some(msg) = msg {
-            p.rect_filled(board, 16.0, Color32::from_black_alpha(90));
-            p.text(board.center(), Align2::CENTER_CENTER, msg, bold(14.0), Color32::WHITE);
+        match self.phase {
+            Phase::Idle => overlay(&p, board, "Snake", "Click to play"),
+            Phase::Dead => overlay(&p, board, "Game over", "Click to retry"),
+            Phase::Running => {}
         }
 
         p.text(

@@ -63,4 +63,8 @@ cargo run --release -- path/to/wallpaper.mp4
 
 ## Credits
 
-- 
+- egui and eframe by Emil Ernerfeldt and contributors
+- egui_glass by heonny
+- Inter by Rasmus Andersson
+- JetBrains Mono by JetBrains
+- Cat sprites by Elthen (https://elthen.itch.io/2d-pixel-art-cat-sprites)
