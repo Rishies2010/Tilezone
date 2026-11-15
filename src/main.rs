@@ -130,6 +130,7 @@ struct App {
     drag: Option<(u64, Vec2)>,
     resize: Option<(u64, Vec2)>,
     warp: Warp,
+    hold: Option<(Pos2, f64)>,
     pet: Pet,
     sheet: Sheet,
     store: Store,
@@ -209,6 +210,7 @@ impl App {
             drag: None,
             resize: None,
             warp: Warp::new(),
+            hold: None,
             pet: Pet::new(),
             sheet,
             store,
@@ -221,7 +223,7 @@ impl App {
         let mut p = hub.borrow_mut();
         match p.request.take() {
             Some(Choice::Default) => {
-                self.wallpaper.use_aurora();
+                self.wallpaper.use_default();
                 p.wallpaper_path = None;
                 p.error = None;
             }
@@ -701,11 +703,28 @@ impl eframe::App for App {
                     None
                 }
             });
+            let on_tile = outs.iter().any(|(_, o)| o.body_hovered);
+            let blank = |p: Pos2| !on_tile && ctx.layer_id_at(p).is_none_or(|l| l.order == Order::Background);
             if let (Some((p, right)), false, false) = (press, self.editing, reduce || !prefs.warp || on_pet) {
-                let on_tile = outs.iter().any(|(_, o)| o.body_hovered);
-                let on_backdrop = ctx.layer_id_at(p).is_none_or(|l| l.order == Order::Background);
-                if on_tile || on_backdrop {
+                if on_tile || blank(p) {
                     self.warp.push(p, time, right);
+                }
+            }
+
+            if !ctx.input(|i| i.pointer.primary_down()) {
+                self.hold = None;
+            } else if let Some((p, false)) = press {
+                self.hold = blank(p).then_some((p, time));
+            }
+            if let Some((origin, since)) = self.hold {
+                if self.editing || pointer.is_none_or(|q| q.distance(origin) > 10.0) {
+                    self.hold = None;
+                } else if time - since > 0.55 {
+                    self.editing = true;
+                    self.expanded = false;
+                    self.hold = None;
+                } else {
+                    ctx.request_repaint();
                 }
             }
             self.warp.draw_rings(&ctx, time);

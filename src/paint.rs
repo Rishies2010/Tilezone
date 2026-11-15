@@ -265,9 +265,10 @@ impl Applet for Paint {
         ui.add_space(4.0);
 
         let area = ui.available_rect_before_wrap();
-        let scale = (area.width() / CW as f32).min(area.height() / CH as f32).max(0.05);
+        let scale = (area.width() / CW as f32).max(area.height() / CH as f32).max(0.05);
         let canvas = Rect::from_center_size(area.center(), vec2(CW as f32, CH as f32) * scale);
-        let resp = ui.interact(canvas, ui.scope_id().with("canvas"), Sense::drag());
+        let visible = canvas.intersect(area);
+        let resp = ui.interact(visible, ui.scope_id().with("canvas"), Sense::drag());
 
         if resp.is_pointer_button_down_on() {
             if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
@@ -287,9 +288,13 @@ impl Applet for Paint {
         }
 
         self.flush(ui.ctx());
-        ui.painter().rect_filled(canvas, 14.0, dim(18));
+        ui.painter().rect_filled(visible, 14.0, dim(18));
         if let Some(tex) = &self.tex {
-            egui::Image::new((tex.id(), canvas.size())).corner_radius(14.0).paint_at(ui, canvas);
+            let uv = Rect::from_min_max(
+                pos2((visible.min.x - canvas.min.x) / canvas.width(), (visible.min.y - canvas.min.y) / canvas.height()),
+                pos2((visible.max.x - canvas.min.x) / canvas.width(), (visible.max.y - canvas.min.y) / canvas.height()),
+            );
+            egui::Image::new((tex.id(), visible.size())).uv(uv).corner_radius(14.0).paint_at(ui, visible);
         }
     }
 }

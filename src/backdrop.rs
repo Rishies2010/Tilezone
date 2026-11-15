@@ -81,6 +81,8 @@ enum Source {
     Aurora,
 }
 
+const BUNDLED: &[u8] = include_bytes!("../wallpaper.png");
+
 pub struct Wallpaper {
     rs: RenderState,
     gpu: Option<Gpu>,
@@ -98,7 +100,7 @@ impl Wallpaper {
             label: "Default".into(),
             error: None,
         };
-        w.ensure(AURORA);
+        w.use_default();
         w
     }
 
@@ -110,10 +112,25 @@ impl Wallpaper {
         self.error.take()
     }
 
-    pub fn use_aurora(&mut self) {
-        self.ensure(AURORA);
-        self.source = Source::Aurora;
+    pub fn use_default(&mut self) {
+        match image::load_from_memory(BUNDLED) {
+            Ok(img) => self.set_still(img),
+            Err(_) => {
+                self.ensure(AURORA);
+                self.source = Source::Aurora;
+            }
+        }
         self.label = "Default".into();
+    }
+
+    fn set_still(&mut self, mut img: image::DynamicImage) {
+        if img.width().max(img.height()) > STILL_MAX {
+            img = img.thumbnail(STILL_MAX, STILL_MAX);
+        }
+        let rgba = img.to_rgba8();
+        self.ensure((rgba.width(), rgba.height()));
+        upload(&self.rs, &self.gpu, rgba.as_raw());
+        self.source = Source::Still;
     }
 
     pub fn load(&mut self, path: &Path) -> Result<(), String> {
@@ -128,14 +145,8 @@ impl Wallpaper {
             self.ensure(clip.size);
             self.source = Source::Clip(clip, None);
         } else {
-            let mut img = image::open(path).map_err(|e| e.to_string())?;
-            if img.width().max(img.height()) > STILL_MAX {
-                img = img.thumbnail(STILL_MAX, STILL_MAX);
-            }
-            let rgba = img.to_rgba8();
-            self.ensure((rgba.width(), rgba.height()));
-            upload(&self.rs, &self.gpu, rgba.as_raw());
-            self.source = Source::Still;
+            let img = image::open(path).map_err(|e| e.to_string())?;
+            self.set_still(img);
         }
         self.label = name;
         Ok(())
@@ -199,7 +210,7 @@ impl Wallpaper {
         }
         if failed {
             self.error = Some("ffmpeg could not play that file".into());
-            self.use_aurora();
+            self.use_default();
         }
     }
 
