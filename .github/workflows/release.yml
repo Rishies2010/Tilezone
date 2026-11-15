@@ -1,7 +1,9 @@
 
-name: Build Tilezone Releases
+name: Tilezone CI & Release
 
 on:
+  push:
+  pull_request:
   release:
     types: [published]
 
@@ -9,11 +11,38 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
+  test:
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
 
     strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
+
+  build:
+    name: Build (${{ matrix.name }})
+    if: github.event_name == 'release'
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
       matrix:
         include:
           - name: Linux x86_64
@@ -29,20 +58,20 @@ jobs:
             asset: tilezone-windows-x86_64.exe
 
           - name: macOS Intel
-            os: macos-15-intel
+            os: macos-26-intel
             target: x86_64-apple-darwin
             binary: tilezone
             asset: tilezone-macos-x86_64
 
           - name: macOS Apple Silicon
-            os: macos-15
+            os: macos-26
             target: aarch64-apple-darwin
             binary: tilezone
             asset: tilezone-macos-aarch64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -56,11 +85,29 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
-             "dist/${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          name: tilezone-${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v3
+        with:
           files: dist/*
