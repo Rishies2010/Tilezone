@@ -1,0 +1,66 @@
+
+name: Build Tilezone Releases
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: tilezone
+            asset: tilezone-linux-x86_64
+
+          - name: Windows x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: tilezone.exe
+            asset: tilezone-windows-x86_64.exe
+
+          - name: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: tilezone
+            asset: tilezone-macos-x86_64
+
+          - name: macOS Apple Silicon
+            os: macos-15
+            target: aarch64-apple-darwin
+            binary: tilezone
+            asset: tilezone-macos-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
+             "dist/${{ matrix.asset }}"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*
