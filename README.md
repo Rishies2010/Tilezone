@@ -3,8 +3,8 @@
 <p align="center">
   <img
     width="1920"
-    alt="screenshot"
-    src="https://github.com/user-attachments/assets/47168c9c-32db-4939-8b91-5acda433de81"
+    alt="Screenshot"
+    src="https://github.com/user-attachments/assets/898a9b65-8e28-42ec-9ac0-51ef81c8cafb"
   />
 </p>
 
