@@ -61,7 +61,7 @@ cargo run --release -- path/to/wallpaper.mp4
 
 ## Known bugs
 
-- Some videos stutter/lag when looping around.
+- None yet
 
 ## Credits
 

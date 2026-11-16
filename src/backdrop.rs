@@ -2,8 +2,10 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui::epaint::Vertex;
 use eframe::egui::{self, pos2, vec2, Color32, Mesh, Rect, Shape, TextureId, Ui};
@@ -13,6 +15,8 @@ use eframe::egui_wgpu::{wgpu, RenderState};
 use image::AnimationDecoder;
 
 const VIDEO: (u32, u32) = (1280, 720);
+const FPS: u32 = 30;
+const HEAD_FRAMES: usize = 30;
 const AURORA: (u32, u32) = (256, 144);
 const STILL_MAX: u32 = 3840;
 const CLIP_MAX: u32 = 1280;
@@ -33,44 +37,102 @@ struct Clip {
 }
 
 struct Video {
-    child: Child,
     rx: Receiver<Vec<u8>>,
+    stop: Arc<AtomicBool>,
     shown: bool,
+}
+
+fn decoder(path: &Path) -> Result<Child, String> {
+    let (w, h) = VIDEO;
+    let filter = format!("fps={FPS},scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}");
+    let mut child = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-an", "-sn", "-vf", &filter, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "ffmpeg was not found on PATH".to_string())?;
+    if child.stdout.is_none() {
+        let _ = child.kill();
+        return Err("ffmpeg gave no output pipe".into());
+    }
+    Ok(child)
+}
+
+fn pump(path: &Path, mut child: Child, tx: SyncSender<Vec<u8>>, stop: &AtomicBool) {
+    let len = (VIDEO.0 * VIDEO.1 * 4) as usize;
+    let step = Duration::from_secs_f64(1.0 / FPS as f64);
+    let mut due = Instant::now();
+    let mut head: Vec<Vec<u8>> = Vec::new();
+    let mut pass = 0;
+    loop {
+        let Some(mut out) = child.stdout.take() else { break };
+        let mut send = |frame: Vec<u8>| {
+            let now = Instant::now();
+            if due > now {
+                std::thread::sleep(due - now);
+            } else if now - due > step * 8 {
+                due = now;
+            }
+            due += step;
+            !stop.load(Ordering::Relaxed) && !matches!(tx.try_send(frame), Err(TrySendError::Disconnected(_)))
+        };
+
+        let skip = head.len();
+        let mut alive = true;
+        if pass > 0 {
+            for f in &head {
+                if !send(f.clone()) {
+                    alive = false;
+                    break;
+                }
+            }
+        }
+        let mut n = 0usize;
+        while alive {
+            let mut frame = vec![0u8; len];
+            if out.read_exact(&mut frame).is_err() {
+                break;
+            }
+            n += 1;
+            if pass == 0 && head.len() < HEAD_FRAMES {
+                head.push(frame.clone());
+            }
+            if pass > 0 && n <= skip {
+                continue;
+            }
+            alive = send(frame);
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if !alive || (pass == 0 && head.is_empty()) {
+            return;
+        }
+        match decoder(path) {
+            Ok(next) => child = next,
+            Err(_) => return,
+        }
+        pass += 1;
+    }
 }
 
 impl Video {
     fn open(path: &Path) -> Result<Self, String> {
-        let (w, h) = VIDEO;
-        let filter = format!("fps=30,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}");
-        let mut child = Command::new("ffmpeg")
-            .args(["-v", "error", "-re", "-stream_loop", "-1", "-i"])
-            .arg(path)
-            .args(["-an", "-sn", "-vf", &filter, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "ffmpeg was not found on PATH".to_string())?;
-        let mut out = child.stdout.take().ok_or("ffmpeg gave no output pipe")?;
-        let (tx, rx) = sync_channel(16);
-        let len = (w * h * 4) as usize;
-        std::thread::spawn(move || loop {
-            let mut buf = vec![0u8; len];
-            if out.read_exact(&mut buf).is_err() {
-                break;
-            }
-            if let Err(TrySendError::Disconnected(_)) = tx.try_send(buf) {
-                break;
-            }
-        });
-        Ok(Self { child, rx, shown: false })
+        let child = decoder(path)?;
+        let (tx, rx) = sync_channel(8);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (path, flag) = (path.to_path_buf(), stop.clone());
+        std::thread::spawn(move || pump(&path, child, tx, &flag));
+        Ok(Self { rx, stop, shown: false })
     }
 }
 
 impl Drop for Video {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -195,15 +257,19 @@ impl Wallpaper {
             }
             Source::Video(v) => {
                 let mut latest = None;
-                while let Ok(frame) = v.rx.try_recv() {
-                    latest = Some(frame);
+                loop {
+                    match v.rx.try_recv() {
+                        Ok(frame) => latest = Some(frame),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            failed = true;
+                            break;
+                        }
+                    }
                 }
                 if let Some(frame) = latest {
                     upload(&self.rs, &self.gpu, &frame);
                     v.shown = true;
-                }
-                if !v.shown && matches!(v.child.try_wait(), Ok(Some(_))) {
-                    failed = true;
                 }
                 ctx.request_repaint_after(Duration::from_secs_f32(interval));
             }
