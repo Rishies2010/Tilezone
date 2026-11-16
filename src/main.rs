@@ -299,13 +299,22 @@ impl App {
 
     fn merge_into(&mut self, src: u64, dst: u64) {
         self.drag = None;
+        self.resize = None;
         self.merge = None;
-        if let Some(i) = self.tiles.iter().position(|t| t.id == src) {
-            let apps = self.tiles.remove(i).into_applets();
-            self.motion.remove(&src);
-            if let Some(t) = self.tiles.iter_mut().find(|t| t.id == dst) {
-                t.absorb(apps);
-            }
+
+        if src == dst || self.closing.contains(&src) || self.closing.contains(&dst) {
+            return;
+        }
+
+        let Some(src_index) = self.tiles.iter().position(|t| t.id == src) else { return };
+        let Some(dst_index) = self.tiles.iter().position(|t| t.id == dst) else { return };
+
+        let apps = self.tiles.remove(src_index).into_applets();
+        self.motion.remove(&src);
+
+        let dst_index = if src_index < dst_index { dst_index - 1 } else { dst_index };
+        if let Some(tile) = self.tiles.get_mut(dst_index) {
+            tile.absorb(apps);
         }
     }
 
@@ -607,7 +616,7 @@ impl eframe::App for App {
             }
 
             let amount = wheel_amount(&ctx, prefs.scroll_mod);
-            if amount != 0.0 && !self.editing {
+            if amount != 0.0 {
                 if let Some(p) = pointer {
                     let hit = match self.focus.filter(|_| self.expanded) {
                         Some(fid) => self.tiles.iter().position(|t| t.id == fid),
@@ -666,11 +675,15 @@ impl eframe::App for App {
             if let Some((did, _)) = self.drag {
                 let center = slots.iter().find(|s| s.id == did).map(|s| s.rect.center());
                 let target = center.and_then(|c| {
-                    slots.iter().find(|s| s.id != did && !self.closing.contains(&s.id) && s.rect.contains(c)).map(|s| s.id)
+                    slots
+                        .iter()
+                        .find(|s| s.id != did && !s.dragged && !s.resized && !self.closing.contains(&s.id) && s.rect.contains(c))
+                        .map(|s| s.id)
                 });
+
                 self.merge = match (target, self.merge) {
-                    (Some(t), Some((o, since))) if t == o => Some((t, since)),
-                    (Some(t), _) => Some((t, time)),
+                    (Some(target), Some((current, since))) if target == current => Some((target, since)),
+                    (Some(target), _) => Some((target, time)),
                     _ => None,
                 };
             } else {
@@ -779,6 +792,17 @@ impl eframe::App for App {
                 if out.long_press && !self.editing && !self.pet.held() {
                     self.editing = true;
                     self.expanded = false;
+                }
+                if out.remove_applet {
+                    if let Some(tile) = self.tiles.iter_mut().find(|t| t.id == id) {
+                        tile.remove_active();
+                    }
+                }
+
+                if let Some(offset) = out.move_applet {
+                    if let Some(tile) = self.tiles.iter_mut().find(|t| t.id == id) {
+                        tile.move_active(offset);
+                    }
                 }
                 if out.remove {
                     self.closing.insert(id);

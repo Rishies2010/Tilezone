@@ -36,6 +36,8 @@ pub struct Out {
     pub expand: bool,
     pub long_press: bool,
     pub remove: bool,
+    pub remove_applet: bool,
+    pub move_applet: Option<isize>,
     pub drag: Option<Vec2>,
     pub drag_end: bool,
     pub resize: Option<Vec2>,
@@ -117,6 +119,24 @@ impl Tile {
     pub fn absorb(&mut self, more: Vec<Box<dyn Applet>>) {
         self.applets.extend(more);
         self.active = self.applets.len() - 1;
+    }
+
+    pub fn remove_active(&mut self) -> bool {
+        if self.applets.len() <= 1 {
+            return false;
+        }
+        self.applets.remove(self.active);
+        self.active = self.active.min(self.applets.len() - 1);
+        true
+    }
+
+    pub fn move_active(&mut self, offset: isize) {
+        let Some(target) = self.active.checked_add_signed(offset) else { return };
+        if target >= self.applets.len() {
+            return;
+        }
+        self.applets.swap(self.active, target);
+        self.active = target;
     }
 
     pub fn ghost(&mut self, ui: &mut Ui, rect: Rect, radius: f32) {
@@ -206,7 +226,11 @@ impl Tile {
             body.max.y -= 14.0;
         }
 
-        let pos = ctx.animate_value_with_time(Id::unique((self.id, "slide")), self.active as f32, 0.25);
+        let pos = if view.editing {
+            self.active as f32
+        } else {
+            ctx.animate_value_with_time(Id::unique((self.id, "slide")), self.active as f32, 0.25)
+        };
         for (i, applet) in self.applets.iter_mut().enumerate() {
             let off = i as f32 - pos;
             if off.abs() >= 1.0 {
@@ -235,38 +259,125 @@ impl Tile {
                 let drop_rect = expand_rect.translate(vec2(-HEADER - 4.0, 0.0));
                 let resp = icon_button(ui, drop_rect, (self.id, "drop"), fade, chevron_icon);
                 let names: Vec<&'static str> = self.applets.iter().map(|a| a.name()).collect();
+                let active = self.active;
                 let mut pick = None;
+                let mut move_applet = None;
+                let mut remove_applet = false;
+
                 glass::menu(&resp, |ui| {
                     for (i, name) in names.iter().enumerate() {
-                        if ui.selectable_label(i == self.active, *name).clicked() {
-                            pick = Some(i);
-                            ui.close();
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(i == active, *name).clicked() {
+                                pick = Some(i);
+                                ui.close();
+                            }
+
+                            if view.editing && i == active {
+                                if ui.small_button("←").clicked() {
+                                    move_applet = Some(-1);
+                                }
+                                if ui.small_button("→").clicked() {
+                                    move_applet = Some(1);
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    remove_applet = true;
+                                    ui.close();
+                                }
+                            }
+                        });
                     }
                 });
+
                 if let Some(i) = pick {
                     self.active = i;
                 }
+                out.move_applet = move_applet;
+                out.remove_applet = remove_applet;
             }
         }
 
         if many {
-            let show = ctx.animate_bool_with_time(Id::unique((self.id, "dots")), view.ctrl && hovering, 0.15);
+            let show = ctx.animate_bool_with_time(
+                Id::unique((self.id, "dots")),
+                view.editing || (view.ctrl && hovering),
+                0.15,
+            );
+
             if show > 0.02 {
                 let n = self.applets.len();
                 for i in 0..n {
                     let x = inner.center().x + (i as f32 - (n as f32 - 1.0) / 2.0) * 13.0;
                     let near = (1.0 - (i as f32 - pos).abs()).clamp(0.0, 1.0);
-                    let a = (90.0 + 165.0 * near) * show;
-                    ui.painter()
-                        .circle_filled(pos2(x, inner.max.y - 4.0), 2.6 + near, Color32::from_white_alpha(a as u8));
+                    let alpha = (90.0 + 165.0 * near) * show;
+                    let radius = 2.6 + 2.0 * near;
+
+                    ui.painter().circle_filled(
+                        pos2(x, inner.max.y - 4.0),
+                        radius,
+                        Color32::from_white_alpha(alpha as u8),
+                    );
                 }
             }
         }
 
+        if many && view.editing {
+            let center = rect.min + vec2(rect.width() - 16.0, 16.0);
+            let radius = 10.0;
+            let spacing = 24.0;
+
+            let remove = Rect::from_center_size(center, vec2(22.0, 22.0));
+            let next = Rect::from_center_size(center - vec2(spacing, 0.0), vec2(22.0, 22.0));
+            let previous = Rect::from_center_size(center - vec2(spacing * 2.0, 0.0), vec2(22.0, 22.0));
+
+            let previous_resp = ui
+                .interact(previous, Id::unique((self.id, "applet_previous")), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let next_resp = ui
+                .interact(next, Id::unique((self.id, "applet_next")), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let remove_resp = ui
+                .interact(remove, Id::unique((self.id, "applet_remove")), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+            for (button, label, hovered) in [
+                (previous, "←", previous_resp.hovered()),
+                (next, "→", next_resp.hovered()),
+                (remove, "×", remove_resp.hovered()),
+            ] {
+                ui.painter().circle_filled(
+                    button.center() + vec2(0.0, 1.0),
+                    radius,
+                    Color32::from_white_alpha(if hovered { 255 } else { 225 }),
+                );
+                ui.painter().text(
+                    button.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    bold(if label == "×" { 15.0 } else { 12.0 }),
+                    Color32::from_black_alpha(if hovered { 235 } else { 195 }),
+                );
+            }
+
+            if previous_resp.clicked() {
+                out.move_applet = Some(-1);
+            }
+            if next_resp.clicked() {
+                out.move_applet = Some(1);
+            }
+            if remove_resp.clicked() {
+                out.remove_applet = true;
+            }
+        }
+
         if view.editing {
+            let drag_rect = if many {
+                Rect::from_min_max(rect.min, pos2(rect.max.x - 78.0, rect.max.y))
+            } else {
+                rect
+            };
+
             let drag = ui
-                .interact(rect, Id::unique((self.id, "drag")), Sense::drag())
+                .interact(drag_rect, Id::unique((self.id, "drag")), Sense::drag())
                 .on_hover_cursor(egui::CursorIcon::Grab);
             if drag.dragged() {
                 out.drag = Some(drag.drag_delta());

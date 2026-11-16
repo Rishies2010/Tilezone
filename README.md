@@ -43,7 +43,7 @@ cargo run --release -- path/to/wallpaper.mp4
 | Hover tile, chevron button | Select applet |
 | Ctrl + Scroll over a tile | Cycle applets |
 | Long press a tile | Enter edit mode |
-| Edit mode: drag / corner handle / minus badge | Move or Merge / resize / remove |
+| Edit mode: drag / corner handle / minus badge | Move or merge / resize / remove tile |
 | Edit mode: Add | Insert a new tile |
 | Left click | Outward warp |
 | Right click | Inward warp |
@@ -56,8 +56,6 @@ cargo run --release -- path/to/wallpaper.mp4
 ## Coming features
 
 - Adding more applets, always
-- Feature to rearrange applets within tiles
-- Feature to remove an applet from a multi-applet tile.
 
 ## Known bugs
 

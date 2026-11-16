@@ -737,7 +737,7 @@ impl ClickSpeed {
 
 impl Applet for ClickSpeed {
     fn name(&self) -> &'static str {
-        "Click speed"
+        "Click/s"
     }
 
     fn kind(&self) -> Kind {
