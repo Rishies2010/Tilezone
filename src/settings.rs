@@ -46,6 +46,12 @@ pub struct Prefs {
     pub shooter_difficulty: f32,
     pub clip_len: usize,
     pub sys_interval: f32,
+    pub pad_top: f32,
+    pub pad_bottom: f32,
+    pub pad_left: f32,
+    pub pad_right: f32,
+    pub desktop_input: bool,
+    pub wallpaper: bool,
     #[serde(skip)]
     pub request: Option<Choice>,
     #[serde(skip)]
@@ -84,6 +90,12 @@ impl Default for Prefs {
             shooter_difficulty: 1.0,
             clip_len: 30,
             sys_interval: 1.0,
+            pad_top: 0.0,
+            pad_bottom: 0.0,
+            pad_left: 0.0,
+            pad_right: 0.0,
+            desktop_input: true,
+            wallpaper: true,
             request: None,
             label: String::new(),
             error: None,
@@ -201,6 +213,14 @@ impl Settings {
 
         section(ui, "Layout");
         slider(ui, "Tile gap", &mut p.gap, 4.0..=24.0);
+        slider(ui, "Padding top", &mut p.pad_top, 0.0..=400.0);
+        slider(ui, "Padding bottom", &mut p.pad_bottom, 0.0..=400.0);
+        slider(ui, "Padding left", &mut p.pad_left, 0.0..=400.0);
+        slider(ui, "Padding right", &mut p.pad_right, 0.0..=400.0);
+        if crate::desktop::supported() {
+            toggle(ui, &mut p.wallpaper, "Wallpaper mode");
+            toggle(ui, &mut p.desktop_input, "Interactive wallpaper");
+        }
 
         section(ui, "Pet");
         toggle(ui, &mut p.pet, "Show pet");

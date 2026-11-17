@@ -14,6 +14,7 @@
 
 ## Features
 
+- Use the app as your wallpaper (or windowed)
 - Liquid Glass material
 - Static, video or generated wallpapers
 - Multi-applet tiles

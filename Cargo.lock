@@ -3131,10 +3131,13 @@ dependencies = [
  "egui_glass",
  "env_logger",
  "image",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "sysinfo",
+ "windows-sys 0.52.0",
+ "x11rb",
 ]
 
 [[package]]

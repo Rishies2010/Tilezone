@@ -1,5 +1,6 @@
 mod applets;
 mod backdrop;
+mod desktop;
 mod glass;
 mod paint;
 mod pet;
@@ -13,7 +14,6 @@ mod warp;
 mod widgets;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::egui::{
@@ -24,6 +24,7 @@ use egui_glass::{Glass, GlassStyle, LiveBackdrop, LiveBackdropQuality};
 
 use applets::{ClickSpeed, Clipboard, Kind, Notepad, Photo, Snake, SystemStats, Todo};
 use backdrop::Wallpaper;
+use desktop::Desktop;
 use paint::Paint;
 use pet::{Input as PetInput, Pet, Platform, Sheet};
 use settings::{Choice, Hub, Prefs, Settings};
@@ -137,6 +138,7 @@ struct App {
     sheet: Sheet,
     store: Store,
     last_save: f64,
+    desk: Option<Desktop>,
 }
 
 fn default_tiles(hub: &Hub) -> Vec<Tile> {
@@ -173,7 +175,7 @@ impl App {
         let saved = store.load();
         let hub = settings::hub(saved.as_ref().map_or_else(Prefs::default, |s| s.prefs.clone()));
 
-        let wanted = std::env::args().nth(1).map(|a| PathBuf::from(a.trim().trim_matches('"')));
+        let wanted = desktop::wallpaper_arg();
         let wanted = wanted.or_else(|| hub.borrow().wallpaper_path.clone());
         if let Some(path) = wanted {
             match wallpaper.load(&path) {
@@ -182,6 +184,9 @@ impl App {
             }
         }
         hub.borrow_mut().label = wallpaper.label().to_string();
+        if desktop::window_flag() {
+            hub.borrow_mut().wallpaper = false;
+        }
 
         let (mut tiles, next_id) = match &saved {
             Some(s) => (
@@ -218,6 +223,7 @@ impl App {
             sheet,
             store,
             last_save: 0.0,
+            desk: if desktop::supported() { Desktop::attach(cc, desktop::starts_wallpaper()) } else { None },
         }
     }
 
@@ -552,14 +558,18 @@ impl eframe::App for App {
         glass::publish(&ctx, base_style);
 
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let avail = ui.max_rect();
+            let screen = ui.max_rect();
+            let lo = screen.min + vec2(prefs.pad_left, prefs.pad_top);
+            let hi = (screen.max - vec2(prefs.pad_right, prefs.pad_bottom)).max(lo + vec2(CELL, CELL));
+            let avail = Rect::from_min_max(lo, hi);
             let grid = Grid::new(avail, prefs.gap);
             self.cols = grid.cols;
             self.rows = grid.rows;
             self.relocate();
 
             let full = avail.shrink(MARGIN);
-            let (time, dt, focused) = ctx.input(|i| (i.time, i.stable_dt.min(0.05), i.viewport().focused.unwrap_or(true)));
+            let wall = prefs.wallpaper && self.desk.is_some();
+            let (time, dt, focused) = ctx.input(|i| (i.time, i.stable_dt.min(0.05), wall || i.viewport().focused.unwrap_or(true)));
             let ctrl = ctx.input(|i| mod_held(&i.modifiers, prefs.scroll_mod));
             let pointer = ctx.pointer_hover_pos();
             let fps = if !focused {
@@ -705,7 +715,7 @@ impl eframe::App for App {
                 let (wallpaper, warp, tiles, live) = (&self.wallpaper, &self.warp, &mut self.tiles, &self.live);
                 let radius = base_style.corner_radius;
                 live.run_with_quality(ui, Color32::BLACK, quality, |ui| {
-                    wallpaper.paint(ui, avail, warp, time);
+                    wallpaper.paint(ui, screen, warp, time);
                     if ghosting {
                         for (tile, slot) in tiles.iter_mut().zip(&slots) {
                             if !slot.focused {
@@ -904,6 +914,16 @@ impl eframe::App for App {
         });
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let (wallpaper, interactive) = {
+            let p = self.hub.borrow();
+            (p.wallpaper, p.desktop_input)
+        };
+        if let Some(desk) = &mut self.desk {
+            desk.feed(ctx, raw_input, wallpaper, interactive);
+        }
+    }
+
     fn on_exit(&mut self) {
         self.save_now();
     }
@@ -911,12 +931,23 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result {
     env_logger::init();
+    desktop::prepare_env();
+    let viewport = egui::ViewportBuilder::default().with_title("Tilezone").with_inner_size([900.0, 620.0]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let viewport = if desktop::starts_wallpaper() {
+        viewport
+            .with_decorations(false)
+            .with_inner_size([1920.0, 1080.0])
+            .with_window_level(egui::WindowLevel::AlwaysOnBottom)
+            .with_window_type(egui::viewport::X11WindowType::Desktop)
+    } else {
+        viewport.with_min_inner_size([800.0, 560.0])
+    };
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let viewport = viewport.with_min_inner_size([800.0, 560.0]);
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Tilezone")
-            .with_inner_size([900.0, 620.0])
-            .with_min_inner_size([800.0, 560.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native("Tilezone", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
